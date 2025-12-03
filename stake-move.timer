@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily Stake Move Timer (8AM PST)
+Requires=stake-move.service
+
+[Timer]
+# Run daily at 8:00 AM PST (16:00 UTC)
+# PST is UTC-8, PDT is UTC-7
+# Using America/Los_Angeles timezone
+OnCalendar=*-*-* 08:00:00 America/Los_Angeles
+Persistent=true
+RandomizedDelaySec=0
+
+[Install]
+WantedBy=timers.target
+

@@ -1,0 +1,24 @@
+[Unit]
+Description=Daily Stake Move Automation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/stake-move-automation
+ExecStart=/opt/stake-move-automation/daily_stake_move.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stake-move
+
+# Environment variables
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
