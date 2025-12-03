@@ -98,9 +98,42 @@ log_info "Installing systemd service and timer..."
 cp "$SCRIPT_DIR/stake-move.service" /etc/systemd/system/
 cp "$SCRIPT_DIR/stake-move.timer" /etc/systemd/system/
 
-# Update service file with correct paths
+# Determine the user who will run the service (prefer SUDO_USER, fallback to current user)
+SERVICE_USER="${SUDO_USER:-$USER}"
+if [ "$SERVICE_USER" = "root" ] || [ -z "$SERVICE_USER" ]; then
+    # If running as root without sudo, try to find a non-root user
+    SERVICE_USER=$(getent passwd | awk -F: '$3 >= 1000 && $1 != "nobody" {print $1; exit}')
+    if [ -z "$SERVICE_USER" ]; then
+        SERVICE_USER="root"
+        log_warn "Could not determine non-root user, service will run as root"
+        log_warn "You may need to set up Application Default Credentials for root:"
+        log_warn "  sudo gcloud auth application-default login"
+    else
+        log_info "Detected service user: $SERVICE_USER"
+    fi
+else
+    log_info "Service will run as user: $SERVICE_USER"
+fi
+
+# Update service file with correct paths and user
 sed -i "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|" /etc/systemd/system/stake-move.service
 sed -i "s|ExecStart=.*|ExecStart=$INSTALL_DIR/daily_stake_move.sh|" /etc/systemd/system/stake-move.service
+sed -i "s|^User=.*|User=$SERVICE_USER|" /etc/systemd/system/stake-move.service
+
+# Set up Application Default Credentials path if not root
+if [ "$SERVICE_USER" != "root" ]; then
+    USER_HOME=$(getent passwd "$SERVICE_USER" | cut -d: -f6)
+    ADC_PATH="$USER_HOME/.config/gcloud/application_default_credentials.json"
+    if [ -f "$ADC_PATH" ]; then
+        log_info "Found Application Default Credentials for $SERVICE_USER"
+        # Set environment variable in service file
+        sed -i "/^Environment=/a Environment=\"GOOGLE_APPLICATION_CREDENTIALS=$ADC_PATH\"" /etc/systemd/system/stake-move.service
+    else
+        log_warn "Application Default Credentials not found for $SERVICE_USER"
+        log_warn "The service may fail to access secrets. Run as $SERVICE_USER:"
+        log_warn "  gcloud auth application-default login"
+    fi
+fi
 
 # Function to mask secret value for display
 mask_secret() {
