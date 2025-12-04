@@ -9,23 +9,26 @@ This automation system:
 - Moves stake from hotkey `5EsmkLf4VnpgNM31syMjAWsUrQdW2Yu5xzWbv6oDQydP9vVx` to `5CATQqY6rA26Kkvm2abMTRtxnwyxigHZKxNJq86bUcpYsn35` (RT21)
 - Uses wallet `sn35` for authentication
 - Stores wallet password securely in GCP Secret Manager
+- Uses Python with direct `subtensor.move_stake()` API calls (more reliable than CLI)
 - Logs all operations with detailed stake amounts and timestamps
-- Sends Telegram notifications for operation status and daily logs
+- Sends Telegram notifications for operation status, daily summaries, and logs
+- Tracks metrics: success/failure counts, total stake moved, success rates
 - Handles errors gracefully with proper notifications
 
 ## Architecture
 
 - **Platform**: GCP Compute Engine VM (persistent storage for wallet files)
+- **Implementation**: Python script using Bittensor SDK (no CLI dependencies)
 - **Scheduling**: Systemd timer (reliable, persistent across reboots)
 - **Secrets**: GCP Secret Manager for wallet password and Telegram credentials
 - **Logging**: Structured logs with timestamps, stake amounts, and operation results
-- **Notifications**: Telegram bot integration for real-time alerts and daily log delivery
+- **Notifications**: Telegram bot integration with daily summary reports and metrics tracking
 
 ## Prerequisites
 
 1. **GCP Account** with billing enabled
 2. **GCP VM Instance** (e2-micro or larger) running Linux (Ubuntu/Debian recommended)
-3. **btcli** installed and configured on the VM
+3. **Python 3.8+** installed on the VM
 4. **Wallet files** for `sn35` wallet available
 5. **gcloud CLI** installed on the VM
 6. **Root/sudo access** on the VM
@@ -49,21 +52,22 @@ This automation system:
      --role="roles/secretmanager.secretAccessor"
    ```
 
-### Step 2: Install btcli on VM
+### Step 2: Install Python Dependencies
 
-SSH into your VM and install bittensor CLI:
+The deployment script will automatically install Python dependencies, but you can verify Python is installed:
 
 ```bash
-# Install Python and pip if not already installed
-sudo apt-get update
-sudo apt-get install -y python3 python3-pip
+# Verify Python 3.8+ is installed
+python3 --version
 
-# Install bittensor CLI
-pip3 install bittensor
-
-# Verify installation
-btcli --version
+# Verify pip3 is installed
+pip3 --version
 ```
+
+**Note**: The deployment script (`deploy.sh`) will automatically install all required Python packages from `requirements.txt`:
+- `bittensor` - Bittensor SDK for blockchain interactions
+- `google-cloud-secret-manager` - GCP Secret Manager client
+- `requests` - HTTP library for Telegram API
 
 ### Step 3: Transfer Wallet Files
 
@@ -294,12 +298,17 @@ If Telegram is configured, you will receive:
    - Wallet name
 
 2. **Success/Failure Notification**: Sent when operation completes
-   - Success: Shows stake amounts moved
-   - Failure: Shows error message
+   - Success: Shows stake amounts moved (fetched directly from blockchain)
+   - Failure: Shows detailed error message
 
 3. **Daily Log File**: Complete log file sent as a document attachment
 
-4. **Daily Summary**: Summary of the operation with key details
+4. **Daily Summary Report**: Automatically sent at midnight UTC with:
+   - Success/failure counts and success rate
+   - Total stake moved today
+   - Lifetime total stake moved
+   - Script uptime
+   - System info (hostname, IP, git branch)
 
 **Test Telegram notifications**:
 ```bash
@@ -382,11 +391,16 @@ sudo journalctl -u stake-move.service -f
 
 2. **Check script permissions**:
    ```bash
-   ls -l /opt/stake-move-automation/daily_stake_move.sh
-   sudo chmod +x /opt/stake-move-automation/daily_stake_move.sh
+   ls -l /opt/stake-move-automation/daily_stake_move.py
+   sudo chmod +x /opt/stake-move-automation/daily_stake_move.py
    ```
 
-3. **Verify script path in service file**:
+3. **Verify Python dependencies are installed**:
+   ```bash
+   python3 -c "import bittensor; import google.cloud.secretmanager; import requests"
+   ```
+
+4. **Verify script path in service file**:
    ```bash
    cat /etc/systemd/system/stake-move.service
    ```
@@ -412,12 +426,13 @@ sudo journalctl -u stake-move.service -f
      --role="roles/secretmanager.secretAccessor"
    ```
 
-### btcli Command Fails
+### Python Dependencies Issues
 
-1. **Verify btcli is installed**:
+1. **Verify Python packages are installed**:
    ```bash
-   which btcli
-   btcli --version
+   python3 -c "import bittensor; print('bittensor:', bittensor.__version__)"
+   python3 -c "import google.cloud.secretmanager; print('secretmanager: OK')"
+   python3 -c "import requests; print('requests:', requests.__version__)"
    ```
 
 2. **Check wallet files exist**:
@@ -425,9 +440,15 @@ sudo journalctl -u stake-move.service -f
    ls -la ~/.bittensor/wallets/sn35/
    ```
 
-3. **Test btcli manually**:
+3. **Test Python script manually**:
    ```bash
-   btcli stake show --netuid 35 --wallet.name sn35
+   cd /opt/stake-move-automation
+   python3 daily_stake_move.py
+   ```
+
+4. **Reinstall dependencies if needed**:
+   ```bash
+   pip3 install -r /opt/stake-move-automation/requirements.txt
    ```
 
 ### Logs Not Being Created
@@ -537,11 +558,18 @@ Create `/etc/logrotate.d/stake-move`:
 To update scripts:
 
 ```bash
-# Copy new files to VM
-scp daily_stake_move.sh USER@VM_IP:~/stake-move-automation/
+# Copy new files to VM (including utils directory)
+scp -r daily_stake_move.py utils/ requirements.txt USER@VM_IP:~/stake-move-automation/
 
 # Update installation
-sudo cp ~/stake-move-automation/daily_stake_move.sh /opt/stake-move-automation/
+sudo cp ~/stake-move-automation/daily_stake_move.py /opt/stake-move-automation/
+sudo cp -r ~/stake-move-automation/utils /opt/stake-move-automation/
+sudo cp ~/stake-move-automation/requirements.txt /opt/stake-move-automation/
+
+# Update Python dependencies if requirements.txt changed
+sudo -u <service_user> pip3 install -r /opt/stake-move-automation/requirements.txt
+
+# Reload systemd
 sudo systemctl daemon-reload
 ```
 
@@ -554,11 +582,15 @@ For issues or questions:
 
 ## Files Reference
 
-- `daily_stake_move.sh` - Main automation script
+- `daily_stake_move.py` - Main Python automation script (uses `subtensor.move_stake()` API)
+- `utils/telegram_notifier.py` - Telegram notification handler with daily summaries
+- `requirements.txt` - Python dependencies
 - `stake-move.service` - Systemd service definition
 - `stake-move.timer` - Systemd timer definition (scheduling)
 - `deploy.sh` - Deployment and setup script
 - `README.md` - This file
+
+**Note**: The old bash script (`daily_stake_move.sh`) has been replaced with the Python implementation for better reliability and maintainability.
 
 ## License
 

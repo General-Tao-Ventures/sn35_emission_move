@@ -1,0 +1,4 @@
+bittensor
+google-cloud-secret-manager
+requests
+

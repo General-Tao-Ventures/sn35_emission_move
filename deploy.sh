@@ -49,7 +49,8 @@ check_command() {
 
 log_info "Checking prerequisites..."
 check_command "gcloud" || exit 1
-check_command "expect" || log_warn "expect not found, will install"
+check_command "python3" || log_warn "python3 not found, will install"
+check_command "pip3" || log_warn "pip3 not found, will install"
 
 # Get GCP project ID if not set
 if [ -z "$PROJECT_ID" ]; then
@@ -67,19 +68,25 @@ log_info "Using GCP Project: $PROJECT_ID"
 log_info "Installing system dependencies..."
 if command -v apt-get &> /dev/null; then
     apt-get update
-    apt-get install -y expect tcl tcl-dev curl
+    apt-get install -y python3 python3-pip python3-venv curl git
 elif command -v yum &> /dev/null; then
-    yum install -y expect tcl curl
+    yum install -y python3 python3-pip curl git
 elif command -v dnf &> /dev/null; then
-    dnf install -y expect tcl curl
+    dnf install -y python3 python3-pip curl git
 else
-    log_warn "Unknown package manager. Please install 'expect' and 'curl' manually."
+    log_warn "Unknown package manager. Please install 'python3', 'pip3', and 'curl' manually."
 fi
 
-# Check if btcli is installed
-if ! command -v btcli &> /dev/null; then
-    log_warn "btcli not found in PATH. Please ensure btcli is installed and accessible."
-    log_info "You may need to install bittensor CLI separately."
+# Verify Python installation
+if ! command -v python3 &> /dev/null; then
+    log_error "python3 is not installed. Please install Python 3.8 or higher."
+    exit 1
+fi
+
+# Verify pip installation
+if ! command -v pip3 &> /dev/null; then
+    log_error "pip3 is not installed. Please install pip3."
+    exit 1
 fi
 
 # Create installation directory
@@ -119,8 +126,45 @@ fi
 # Copy scripts to installation directory
 log_info "Copying scripts to $INSTALL_DIR..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cp "$SCRIPT_DIR/daily_stake_move.sh" "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/daily_stake_move.sh"
+cp "$SCRIPT_DIR/daily_stake_move.py" "$INSTALL_DIR/"
+chmod +x "$INSTALL_DIR/daily_stake_move.py"
+
+# Copy utils directory
+if [ -d "$SCRIPT_DIR/utils" ]; then
+    cp -r "$SCRIPT_DIR/utils" "$INSTALL_DIR/"
+    log_info "Copied utils directory"
+fi
+
+# Copy requirements.txt
+if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+    cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
+    log_info "Copied requirements.txt"
+fi
+
+# Install Python dependencies
+log_info "Installing Python dependencies..."
+if [ "$SERVICE_USER" != "root" ]; then
+    USER_HOME=$(getent passwd "$SERVICE_USER" | cut -d: -f6)
+    PIP_CMD="pip3 install --user"
+    PIP_TARGET="$USER_HOME/.local"
+else
+    PIP_CMD="pip3 install"
+    PIP_TARGET="/usr/local"
+fi
+
+# Install requirements
+if [ -f "$INSTALL_DIR/requirements.txt" ]; then
+    log_info "Installing Python packages from requirements.txt..."
+    if sudo -u "$SERVICE_USER" $PIP_CMD -r "$INSTALL_DIR/requirements.txt" 2>&1 | tee /tmp/pip_install.log; then
+        log_info "Python dependencies installed successfully"
+    else
+        log_error "Failed to install Python dependencies. Check /tmp/pip_install.log for details."
+        log_warn "You may need to install dependencies manually: $PIP_CMD -r $INSTALL_DIR/requirements.txt"
+    fi
+else
+    log_warn "requirements.txt not found. Installing basic dependencies..."
+    sudo -u "$SERVICE_USER" $PIP_CMD bittensor google-cloud-secret-manager requests 2>&1 | tee /tmp/pip_install.log || log_warn "Some dependencies may have failed to install"
+fi
 
 # Copy systemd files
 log_info "Installing systemd service and timer..."
@@ -145,14 +189,27 @@ log_info "Service will run as user: $SERVICE_USER"
 
 # Update service file with correct paths and user
 sed -i "s|WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|" /etc/systemd/system/stake-move.service
-sed -i "s|ExecStart=.*|ExecStart=$INSTALL_DIR/daily_stake_move.sh|" /etc/systemd/system/stake-move.service
+
+# Determine Python path
+if [ "$SERVICE_USER" != "root" ]; then
+    USER_HOME=$(getent passwd "$SERVICE_USER" | cut -d: -f6)
+    PYTHON_CMD="$USER_HOME/.local/bin/python3"
+    if [ ! -f "$PYTHON_CMD" ]; then
+        # Fallback to system python3
+        PYTHON_CMD="python3"
+    fi
+    UPDATED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$USER_HOME/.local/bin"
+else
+    PYTHON_CMD="python3"
+    UPDATED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+fi
+
+# Update ExecStart to use Python script
+sed -i "s|ExecStart=.*|ExecStart=$PYTHON_CMD $INSTALL_DIR/daily_stake_move.py|" /etc/systemd/system/stake-move.service
 sed -i "s|^User=.*|User=$SERVICE_USER|" /etc/systemd/system/stake-move.service
 
-# Update PATH to include common locations for btcli (pip installs to ~/.local/bin)
-USER_HOME=$(getent passwd "$SERVICE_USER" | cut -d: -f6)
+# Update PATH to include Python user install location
 if [ -n "$USER_HOME" ] && [ "$SERVICE_USER" != "root" ]; then
-    # Add user's local bin and common Python paths
-    UPDATED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$USER_HOME/.local/bin:$USER_HOME/.cargo/bin"
     # Check if PATH line exists, if not add it
     if ! grep -q "^Environment=\"PATH=" /etc/systemd/system/stake-move.service; then
         sed -i "/^\[Service\]/a Environment=\"PATH=$UPDATED_PATH\"" /etc/systemd/system/stake-move.service
