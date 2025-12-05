@@ -1,4 +1,4 @@
 bittensor
-google-cloud-secret-manager
+python-dotenv
 requests
 

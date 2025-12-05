@@ -17,7 +17,7 @@ import bittensor as bt
 from bittensor.utils.balance import Balance
 from bittensor_wallet import Wallet
 from bittensor_wallet.errors import KeyFileError, PasswordError
-from google.cloud import secretmanager
+from dotenv import load_dotenv
 
 from utils.telegram_notifier import TelegramNotifier
 
@@ -27,10 +27,22 @@ DEST_NETUID = 35
 ORIGIN_HOTKEY = "5EsmkLf4VnpgNM31syMjAWsUrQdW2Yu5xzWbv6oDQydP9vVx"
 DEST_HOTKEY = "5CATQqY6rA26Kkvm2abMTRtxnwyxigHZKxNJq86bUcpYsn35"
 WALLET_NAME = "sn35"
-SECRET_NAME = "stake-move-wallet-sn35-password"
-TELEGRAM_BOT_TOKEN_SECRET = "stake-move-telegram-bot-token"
-TELEGRAM_CHAT_ID_SECRET = "stake-move-telegram-chat-id"
 LOG_DIR = Path("/var/log/stake-move")
+
+# Load environment variables from .env file
+# Try multiple locations: script directory, /opt/stake-move-automation, current directory
+ENV_PATHS = [
+    Path(__file__).parent / ".env",
+    Path("/opt/stake-move-automation") / ".env",
+    Path.cwd() / ".env",
+]
+for env_path in ENV_PATHS:
+    if env_path.exists():
+        load_dotenv(env_path)
+        break
+else:
+    # Fallback to default location if none found
+    load_dotenv(Path("/opt/stake-move-automation") / ".env")
 
 # Setup logging
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,44 +76,11 @@ def log_summary(message: str):
         pass
 
 
-def get_secret(secret_name: str, project_id: Optional[str] = None) -> str:
-    """Fetch secret from GCP Secret Manager"""
-    try:
-        client = secretmanager.SecretManagerServiceClient()
-        
-        if project_id is None:
-            # Try to get project ID from environment or gcloud config
-            project_id = os.environ.get('GCP_PROJECT_ID')
-            if not project_id:
-                # Try to get from gcloud
-                import subprocess
-                result = subprocess.run(
-                    ['gcloud', 'config', 'get-value', 'project'],
-                    capture_output=True,
-                    text=True
-                )
-                if result.returncode == 0:
-                    project_id = result.stdout.strip()
-        
-        if not project_id:
-            raise ValueError("GCP_PROJECT_ID not set and could not determine from gcloud config")
-        
-        name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
-        response = client.access_secret_version(request={"name": name})
-        return response.payload.data.decode('UTF-8')
-    except Exception as e:
-        logger.error(f"Failed to fetch secret {secret_name}: {e}")
-        raise
-
-
 def get_telegram_credentials() -> tuple[Optional[str], Optional[str]]:
-    """Get Telegram credentials from Secret Manager"""
-    try:
-        bot_token = get_secret(TELEGRAM_BOT_TOKEN_SECRET)
-        chat_id = get_secret(TELEGRAM_CHAT_ID_SECRET)
-        return bot_token, chat_id
-    except Exception:
-        return None, None
+    """Get Telegram credentials from environment variables"""
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+    return bot_token, chat_id
 
 
 def ensure_wallet_password_cached(wallet: "bt.wallet", password_value: Optional[str] = None) -> None:
@@ -231,13 +210,11 @@ Destination Hotkey: <code>{DEST_HOTKEY}</code>
 Wallet: {WALLET_NAME}"""
         telegram_notifier.send_message(start_msg)
 
-    # Fetch password from GCP Secret Manager
-    log("Fetching password from GCP Secret Manager...")
-    try:
-        password = get_secret(SECRET_NAME)
-        log("Password retrieved successfully")
-    except Exception as e:
-        error_msg = f"Failed to fetch password from Secret Manager: {e}"
+    # Get password from environment variable
+    log("Reading password from environment variable...")
+    password = os.environ.get('WALLET_PASSWORD')
+    if not password:
+        error_msg = "WALLET_PASSWORD environment variable not set. Please create a .env file with WALLET_PASSWORD=your_password"
         log(f"ERROR: {error_msg}")
         log_summary(f"FAILED: {error_msg}")
         
@@ -255,6 +232,8 @@ Please check the logs for more details."""
             telegram_notifier.record_stake_move_failure()
         
         sys.exit(1)
+    
+    log("Password retrieved successfully")
 
     # Initialize bittensor components
     try:

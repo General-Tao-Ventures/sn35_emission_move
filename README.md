@@ -1,6 +1,6 @@
 # GCP VM Stake Move Automation
 
-Automated daily stake move operation that runs at 8AM PST on a GCP Compute Engine VM. This system moves stake from a specific hotkey to RT21 using wallet `sn35`, with password stored securely in GCP Secret Manager and comprehensive logging.
+Automated daily stake move operation that runs at 8AM PST on a GCP Compute Engine VM. This system moves stake from a specific hotkey to RT21 using wallet `sn35`, with password stored in a `.env` file and comprehensive logging.
 
 ## Overview
 
@@ -8,7 +8,7 @@ This automation system:
 - Runs daily at **8AM PST** (16:00 UTC)
 - Moves stake from hotkey `5EsmkLf4VnpgNM31syMjAWsUrQdW2Yu5xzWbv6oDQydP9vVx` to `5CATQqY6rA26Kkvm2abMTRtxnwyxigHZKxNJq86bUcpYsn35` (RT21)
 - Uses wallet `sn35` for authentication
-- Stores wallet password securely in GCP Secret Manager
+- Stores wallet password in a `.env` file (simple and secure)
 - Uses Python with direct `subtensor.move_stake()` API calls (more reliable than CLI)
 - Logs all operations with detailed stake amounts and timestamps
 - Sends Telegram notifications for operation status, daily summaries, and logs
@@ -20,18 +20,17 @@ This automation system:
 - **Platform**: GCP Compute Engine VM (persistent storage for wallet files)
 - **Implementation**: Python script using Bittensor SDK (no CLI dependencies)
 - **Scheduling**: Systemd timer (reliable, persistent across reboots)
-- **Secrets**: GCP Secret Manager for wallet password and Telegram credentials
+- **Secrets**: `.env` file for wallet password and Telegram credentials
 - **Logging**: Structured logs with timestamps, stake amounts, and operation results
 - **Notifications**: Telegram bot integration with daily summary reports and metrics tracking
 
 ## Prerequisites
 
-1. **GCP Account** with billing enabled
-2. **GCP VM Instance** (e2-micro or larger) running Linux (Ubuntu/Debian recommended)
+1. **GCP Account** with billing enabled (or any Linux server)
+2. **VM Instance** (e2-micro or larger) running Linux (Ubuntu/Debian recommended)
 3. **Python 3.8+** installed on the VM
 4. **Wallet files** for `sn35` wallet available
-5. **gcloud CLI** installed on the VM
-6. **Root/sudo access** on the VM
+5. **Root/sudo access** on the VM
 
 ## Setup Instructions
 
@@ -43,14 +42,7 @@ This automation system:
    - **OS**: Ubuntu 22.04 LTS or Debian 11+
    - **Boot disk**: 20GB standard persistent disk
    - **Firewall**: Allow HTTP/HTTPS traffic (if needed)
-   - **Service account**: Create or use existing service account with Secret Manager access
-
-3. **Important**: Ensure the VM's service account has the `Secret Manager Secret Accessor` role:
-   ```bash
-   gcloud projects add-iam-policy-binding PROJECT_ID \
-     --member="serviceAccount:SERVICE_ACCOUNT@PROJECT_ID.iam.gserviceaccount.com" \
-     --role="roles/secretmanager.secretAccessor"
-   ```
+   - **Service account**: Not required (we use `.env` file instead)
 
 ### Step 2: Install Python Dependencies
 
@@ -66,7 +58,7 @@ pip3 --version
 
 **Note**: The deployment script (`deploy.sh`) will automatically install all required Python packages from `requirements.txt`:
 - `bittensor` - Bittensor SDK for blockchain interactions
-- `google-cloud-secret-manager` - GCP Secret Manager client
+- `python-dotenv` - Load environment variables from `.env` file
 - `requests` - HTTP library for Telegram API
 
 ### Step 3: Transfer Wallet Files
@@ -132,18 +124,9 @@ To receive notifications and daily logs via Telegram:
    - **Note**: Group chat IDs are negative numbers (e.g., `-1003492410161`)
    - Make sure the bot has permission to send messages in the group
 
-3. **Store credentials** (will be prompted during deployment, or manually):
-   ```bash
-   # Store bot token
-   echo -n "YOUR_BOT_TOKEN" | gcloud secrets create stake-move-telegram-bot-token \
-     --data-file=- --project=YOUR_PROJECT_ID
-   
-   # Store chat ID
-   echo -n "YOUR_CHAT_ID" | gcloud secrets create stake-move-telegram-chat-id \
-     --data-file=- --project=YOUR_PROJECT_ID
-   ```
+3. **Store credentials in `.env` file** (see Step 5 below for details)
 
-**Note**: The deployment script will prompt you to configure Telegram during setup. You can skip this step and configure it later if needed.
+**Note**: Telegram notifications are optional. You can skip this step and configure it later if needed.
 
 ### Step 6: Deploy Automation Scripts
 
@@ -164,11 +147,12 @@ To receive notifications and daily logs via Telegram:
    ```
 
    The deployment script will:
-   - Install required dependencies (expect, tcl)
-   - Create GCP Secret Manager secret (prompts for password)
+   - Install required dependencies
    - Configure systemd service and timer
    - Enable and start the timer
    - Show next scheduled run time
+   
+   **Important**: You'll need to create a `.env` file manually (see Step 5)
 
 ### Step 7: Verify Installation
 
@@ -203,35 +187,52 @@ sudo systemctl daemon-reload
 sudo systemctl restart stake-move.timer
 ```
 
-### Update Wallet Password
+### Step 5: Create `.env` File
 
-To update the password in Secret Manager:
+Create a `.env` file in `/opt/stake-move-automation/` with your credentials:
 
 ```bash
-# Update secret
-echo -n "NEW_PASSWORD" | gcloud secrets versions add stake-move-wallet-sn35-password --data-file=-
+sudo nano /opt/stake-move-automation/.env
+```
+
+Add the following content (replace with your actual values):
+
+```bash
+# Wallet password for sn35 wallet (REQUIRED)
+WALLET_PASSWORD=your_wallet_password_here
+
+# Telegram bot token (optional - for notifications)
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+
+# Telegram chat ID (optional - for notifications)
+TELEGRAM_CHAT_ID=your_telegram_chat_id_here
+```
+
+**Security**: Set proper permissions on the `.env` file:
+```bash
+sudo chmod 600 /opt/stake-move-automation/.env
+sudo chown root:root /opt/stake-move-automation/.env
+```
+
+### Update Wallet Password
+
+To update the password, edit the `.env` file:
+
+```bash
+sudo nano /opt/stake-move-automation/.env
+# Update WALLET_PASSWORD=your_new_password
 ```
 
 ### Configure or Update Telegram Settings
 
-To configure Telegram after initial deployment:
+To configure or update Telegram, edit the `.env` file:
 
 ```bash
-# Update bot token
-echo -n "YOUR_BOT_TOKEN" | gcloud secrets versions add stake-move-telegram-bot-token \
-  --data-file=- --project=YOUR_PROJECT_ID
-
-# Update chat ID
-echo -n "YOUR_CHAT_ID" | gcloud secrets versions add stake-move-telegram-chat-id \
-  --data-file=- --project=YOUR_PROJECT_ID
+sudo nano /opt/stake-move-automation/.env
+# Update TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
 ```
 
-To disable Telegram notifications, delete the secrets (the script will gracefully skip notifications if secrets don't exist):
-
-```bash
-gcloud secrets delete stake-move-telegram-bot-token --project=YOUR_PROJECT_ID
-gcloud secrets delete stake-move-telegram-chat-id --project=YOUR_PROJECT_ID
-```
+To disable Telegram notifications, simply remove or comment out the Telegram lines in the `.env` file (the script will gracefully skip notifications if they're not set).
 
 ### Change Hotkey Addresses
 
@@ -407,23 +408,22 @@ sudo journalctl -u stake-move.service -f
 
 ### Password Retrieval Fails
 
-1. **Check Secret Manager access**:
+1. **Check `.env` file exists and has correct permissions**:
    ```bash
-   gcloud secrets versions access latest --secret=stake-move-wallet-sn35-password
+   ls -la /opt/stake-move-automation/.env
+   # Should show: -rw------- (600 permissions, owned by root)
    ```
 
-2. **Verify service account permissions**:
+2. **Verify `.env` file has WALLET_PASSWORD set**:
    ```bash
-   gcloud projects get-iam-policy PROJECT_ID \
-     --flatten="bindings[].members" \
-     --filter="bindings.members:serviceAccount:*"
+   sudo grep WALLET_PASSWORD /opt/stake-move-automation/.env
+   # Should show: WALLET_PASSWORD=your_password
    ```
 
-3. **Grant Secret Manager access**:
+3. **Test reading environment variables**:
    ```bash
-   gcloud projects add-iam-policy-binding PROJECT_ID \
-     --member="serviceAccount:SERVICE_ACCOUNT@PROJECT_ID.iam.gserviceaccount.com" \
-     --role="roles/secretmanager.secretAccessor"
+   cd /opt/stake-move-automation
+   python3 -c "from dotenv import load_dotenv; import os; load_dotenv(); print('WALLET_PASSWORD set:', bool(os.getenv('WALLET_PASSWORD')))"
    ```
 
 ### Python Dependencies Issues
@@ -431,7 +431,7 @@ sudo journalctl -u stake-move.service -f
 1. **Verify Python packages are installed**:
    ```bash
    python3 -c "import bittensor; print('bittensor:', bittensor.__version__)"
-   python3 -c "import google.cloud.secretmanager; print('secretmanager: OK')"
+   python3 -c "import dotenv; print('python-dotenv: OK')"
    python3 -c "import requests; print('requests:', requests.__version__)"
    ```
 
@@ -484,35 +484,27 @@ sudo journalctl -u stake-move.service -f
 
 ### Telegram Notifications Not Working
 
-1. **Verify secrets exist**:
+1. **Verify `.env` file has Telegram credentials**:
    ```bash
-   gcloud secrets describe stake-move-telegram-bot-token --project=YOUR_PROJECT_ID
-   gcloud secrets describe stake-move-telegram-chat-id --project=YOUR_PROJECT_ID
+   sudo grep TELEGRAM /opt/stake-move-automation/.env
+   # Should show: TELEGRAM_BOT_TOKEN=... and TELEGRAM_CHAT_ID=...
    ```
 
 2. **Test bot token and chat ID**:
    ```bash
-   BOT_TOKEN=$(gcloud secrets versions access latest --secret=stake-move-telegram-bot-token --project=YOUR_PROJECT_ID)
-   CHAT_ID=$(gcloud secrets versions access latest --secret=stake-move-telegram-chat-id --project=YOUR_PROJECT_ID)
-   curl -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-     -d "chat_id=${CHAT_ID}" \
+   cd /opt/stake-move-automation
+   source <(sudo cat .env | grep -E '^TELEGRAM' | sed 's/^/export /')
+   curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+     -d "chat_id=${TELEGRAM_CHAT_ID}" \
      -d "text=Test message"
    ```
 
-3. **Check service account permissions**:
-   ```bash
-   # Ensure service account can access Secret Manager
-   gcloud projects get-iam-policy YOUR_PROJECT_ID \
-     --flatten="bindings[].members" \
-     --filter="bindings.members:serviceAccount:*"
-   ```
-
-4. **Check logs for Telegram errors**:
+3. **Check logs for Telegram errors**:
    ```bash
    sudo journalctl -u stake-move.service | grep -i telegram
    ```
 
-5. **Verify curl is installed**:
+4. **Verify curl is installed**:
    ```bash
    which curl
    # If not installed: sudo apt-get install curl
@@ -521,7 +513,7 @@ sudo journalctl -u stake-move.service -f
 ## Cost Estimation
 
 - **GCP VM (e2-micro)**: ~$5-10/month (always-on) or ~$1-2/month (preemptible)
-- **GCP Secret Manager**: Free tier covers this use case (first 6 versions per secret)
+- **Storage**: Minimal (`.env` file is tiny, ~100 bytes)
 - **Storage**: Minimal (logs are small, ~1MB per month)
 - **Network**: Minimal (only Secret Manager API calls)
 
@@ -530,7 +522,7 @@ sudo journalctl -u stake-move.service -f
 ## Security Considerations
 
 1. **Wallet Files**: Ensure wallet files have restrictive permissions (600)
-2. **Secret Manager**: Use least-privilege IAM roles
+2. **`.env` file**: Ensure proper file permissions (600) and ownership (root)
 3. **VM Access**: Restrict SSH access using firewall rules
 4. **Logs**: Consider rotating logs to prevent disk fill-up
 5. **Service Account**: Use dedicated service account with minimal permissions
@@ -625,19 +617,42 @@ sudo journalctl -u stake-move.service -f
 
 ### Step 5: Check Common Issues
 
-1. **Service failed silently**: Check journal logs for Python errors
-2. **Timezone mismatch**: Verify system timezone matches timer timezone
+1. **GCP Authentication Errors** (Most Common):
+   If you see `Reauthentication is needed. Please run 'gcloud auth application-default login'`:
+   
+   **Root Cause**: The service runs as `root` but is trying to use expired user application-default credentials.
+   
+   **Fix**:
+   ```bash
+   # Option 1: Run the automated fix script (recommended)
+   sudo ./fix_auth.sh
+   
+   # Option 2: Manual fix
+   # Update the service file to use VM service account
+   sudo cp stake-move.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   
+   # Update the Python script
+   sudo cp daily_stake_move.py /opt/stake-move-automation/
+   
+   # Verify .env file exists and has correct content
+   sudo ls -la /opt/stake-move-automation/.env
+   sudo grep WALLET_PASSWORD /opt/stake-move-automation/.env
+   ```
+
+2. **Service failed silently**: Check journal logs for Python errors
+3. **Timezone mismatch**: Verify system timezone matches timer timezone
    ```bash
    timedatectl
    # Should show America/Los_Angeles or similar
    ```
-3. **Permissions issue**: Check if script can write logs
+4. **Permissions issue**: Check if script can write logs
    ```bash
    sudo -u root touch /var/log/stake-move/test.log
    ```
-4. **Python dependencies**: Verify all packages are installed
+5. **Python dependencies**: Verify all packages are installed
    ```bash
-   python3 -c "import bittensor; import google.cloud.secretmanager; import requests; print('OK')"
+   python3 -c "import bittensor; import dotenv; import requests; print('OK')"
    ```
 
 ### Step 6: Force Timer to Recalculate Next Run
