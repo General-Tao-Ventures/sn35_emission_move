@@ -573,12 +573,90 @@ sudo -u <service_user> pip3 install -r /opt/stake-move-automation/requirements.t
 sudo systemctl daemon-reload
 ```
 
+## Troubleshooting: Timer Not Running
+
+If the timer shows as active but the script didn't run:
+
+### Step 1: Check if Service Actually Executed
+
+```bash
+# Check if service ran today
+sudo journalctl -u stake-move.service --since "today 00:00:00" --no-pager
+
+# Check service execution history
+sudo journalctl -u stake-move.service --since "yesterday" --no-pager
+
+# Check for errors
+sudo journalctl -u stake-move.service -p err --since "yesterday" --no-pager
+```
+
+### Step 2: Check Log Files
+
+```bash
+# Check today's log file
+TODAY=$(date +%Y-%m-%d)
+ls -lah /var/log/stake-move/${TODAY}.log
+tail -50 /var/log/stake-move/${TODAY}.log
+
+# Check summary log
+tail -20 /var/log/stake-move/summary.log
+```
+
+### Step 3: Verify Timer Triggered Service
+
+```bash
+# Check timer and service relationship
+sudo systemctl status stake-move.timer -l
+sudo systemctl status stake-move.service -l
+
+# Check if service was triggered but failed
+sudo journalctl -u stake-move.service --since "yesterday" | grep -i "failed\|error\|exception"
+```
+
+### Step 4: Test Manual Execution
+
+```bash
+# Try running the service manually to see if it works
+sudo systemctl start stake-move.service
+
+# Watch logs in real-time
+sudo journalctl -u stake-move.service -f
+```
+
+### Step 5: Check Common Issues
+
+1. **Service failed silently**: Check journal logs for Python errors
+2. **Timezone mismatch**: Verify system timezone matches timer timezone
+   ```bash
+   timedatectl
+   # Should show America/Los_Angeles or similar
+   ```
+3. **Permissions issue**: Check if script can write logs
+   ```bash
+   sudo -u root touch /var/log/stake-move/test.log
+   ```
+4. **Python dependencies**: Verify all packages are installed
+   ```bash
+   python3 -c "import bittensor; import google.cloud.secretmanager; import requests; print('OK')"
+   ```
+
+### Step 6: Force Timer to Recalculate Next Run
+
+If timer seems stuck, reload and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart stake-move.timer
+sudo systemctl status stake-move.timer
+```
+
 ## Support
 
 For issues or questions:
 1. Check logs: `/var/log/stake-move/` and `journalctl -u stake-move.service`
 2. Verify all prerequisites are met
 3. Test manual execution: `sudo systemctl start stake-move.service`
+4. Run the diagnostic script: `./diagnose.sh` (if available on VM)
 
 ## Files Reference
 
