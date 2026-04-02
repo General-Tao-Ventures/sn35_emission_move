@@ -254,7 +254,7 @@ Branch: {self.git_branch}"""
         stats keys (from SheetsLogger.get_sweep_stats()):
           current_balance, period_day, cycle_days,
           next_dist_date, days_until_dist,
-          avg_7d, projected_dist, gtv_projected, ptn_projected,
+          avg_7d, projected_dist, partners_projected,
           dashboard_url, distributions_url, daily_sweeps_url
         """
         if not self.enabled:
@@ -270,8 +270,7 @@ Branch: {self.git_branch}"""
             balance = stats.get("current_balance", 0.0)
             avg_7d = stats.get("avg_7d", 0.0)
             projected = stats.get("projected_dist", 0.0)
-            gtv_proj = stats.get("gtv_projected", 0.0)
-            ptn_proj = stats.get("ptn_projected", 0.0)
+            partners_projected = stats.get("partners_projected", [])
             days_until = stats.get("days_until_dist", 0)
             next_dist = stats.get("next_dist_date")
             dashboard_url = stats.get("dashboard_url", "")
@@ -284,11 +283,14 @@ Branch: {self.git_branch}"""
             filled = round((period_day / cycle) * 10)
             bar = "█" * filled + "░" * (10 - filled)
 
-            # Projected line only shows if we have enough history
-            proj_line = (
-                f"   Projected dist:  <b>{fmt(projected)} α</b>\n"
-                if avg_7d > 0 else ""
-            )
+            # Partner projections line (only shown when we have history + partners)
+            partner_proj_line = ""
+            if avg_7d > 0 and partners_projected:
+                parts = "  |  ".join(
+                    f"{p['name']}: ~{fmt(p['projected'])} α"
+                    for p in partners_projected
+                )
+                partner_proj_line = f"   {parts}\n"
 
             # Build deep links
             link_parts = []
@@ -310,12 +312,12 @@ Branch: {self.git_branch}"""
                 f"   {bar}\n"
                 f"   Accumulated:  <b>{fmt(balance)} α</b>\n"
                 f"   7-day avg:     {fmt(avg_7d)} α / day\n"
-                f"{proj_line}"
-                f"\n"
+                + (f"   Projected dist:  <b>{fmt(projected)} α</b>\n" if avg_7d > 0 else "")
+                + f"\n"
                 f"🗓️ <b>Next Distribution</b>\n"
                 f"   {next_dist_str}  ({days_until}d away)\n"
-                f"   GTV: ~{fmt(gtv_proj)} α  |  PTN: ~{fmt(ptn_proj)} α\n"
-                f"\n"
+                + partner_proj_line
+                + f"\n"
                 f"👉 {links_line}"
             )
             self.send_message(message)
@@ -327,13 +329,10 @@ Branch: {self.git_branch}"""
         period_start,
         period_end,
         total_balance: float,
-        gtv_amount: float,
-        ptn_amount: float,
-        gtv_wallet: str = "",
-        ptn_wallet: str = "",
+        partners: list[dict],   # [{"name": "GTV", "amount": 1.23, "wallet": "5EQv..."}]
         sheet_url: str = "",
     ):
-        """Send distribution day notification with amounts and sheet link."""
+        """Send distribution day notification with per-partner amounts and sheet link."""
         if not self.enabled:
             return
         try:
@@ -352,10 +351,13 @@ Branch: {self.git_branch}"""
             except Exception:
                 pass
 
-            gtv_short = f"{gtv_wallet[:6]}...{gtv_wallet[-4:]}" if len(gtv_wallet) > 10 else gtv_wallet
-            ptn_short = f"{ptn_wallet[:6]}...{ptn_wallet[-4:]}" if len(ptn_wallet) > 10 else ptn_wallet
-
             sheet_line = f'\n\n👉 <a href="{sheet_url}">View Sheet &amp; add tx links</a>' if sheet_url else ""
+
+            partners_block = "".join(
+                f"  {p['name']} → <b>{p['amount']:,.4f} α</b>\n"
+                f"       <code>{p['wallet']}</code>\n"
+                for p in partners
+            )
 
             message = (
                 f"📅 <b>Distribution Day — {fmt_date(period_end)}</b>\n"
@@ -363,13 +365,10 @@ Branch: {self.git_branch}"""
                 f"Period: {fmt_date(period_start)} → {fmt_date(period_end)}{period_days}\n"
                 f"Current Balance: <b>{total_balance:,.4f} α</b>\n"
                 f"\n"
-                f"Split 50/50:\n"
-                f"  GTV → <b>{gtv_amount:,.4f} α</b>\n"
-                f"       <code>{gtv_wallet}</code>\n"
-                f"  PTN → <b>{ptn_amount:,.4f} α</b>\n"
-                f"       <code>{ptn_wallet}</code>\n"
+                f"Splits:\n"
+                f"{partners_block}"
                 f"{sheet_line}\n"
-                f"\nPlease complete the transfer and mark as Completed in the sheet."
+                f"\nPlease complete the transfers and mark as Completed in the sheet."
             )
             self.send_message(message)
         except Exception:
@@ -382,13 +381,16 @@ Branch: {self.git_branch}"""
         try:
             lines = ["⚠️ <b>Distribution Reminder</b>\n"]
             for row in pending_rows:
-                dist_date = row.get("date", "?")
-                gtv = row.get("gtv", "?")
-                ptn = row.get("ptn", "?")
-                has_links = row.get("has_tx_links", False)
+                dist_date   = row.get("date", "?")
+                has_links   = row.get("has_tx_links", False)
+                partner_data = row.get("partners", [])
+
+                amounts_str = "  ·  ".join(
+                    f"{p['name']}: {p['amount']} α" for p in partner_data
+                ) if partner_data else "?"
 
                 lines.append(f"Distribution Date: <b>{dist_date}</b>")
-                lines.append(f"  GTV: {gtv} α  |  PTN: {ptn} α")
+                lines.append(f"  {amounts_str}")
                 if has_links:
                     lines.append("  ✅ Tx links found — please mark as <b>Completed</b> in the sheet.")
                 else:

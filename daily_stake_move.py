@@ -23,14 +23,7 @@ from dotenv import load_dotenv
 from utils.telegram_notifier import TelegramNotifier
 from utils.sheets_logger import SheetsLogger
 
-# Constants
-ORIGIN_NETUID = 35
-DEST_NETUID = 35
-ORIGIN_HOTKEY = "5EsmkLf4VnpgNM31syMjAWsUrQdW2Yu5xzWbv6oDQydP9vVx"
-DEST_HOTKEY = "5CATQqY6rA26Kkvm2abMTRtxnwyxigHZKxNJq86bUcpYsn35"
-WALLET_NAME = "sn35"
 LOG_DIR = Path("/var/log/stake-move")
-MINIMUM_STAKE_THRESHOLD = 0.001  # α — below this, nothing worth sweeping
 
 
 class _BittensorErrorCapture(logging.Handler):
@@ -77,6 +70,25 @@ for env_path in ENV_PATHS:
             # Log but continue trying other paths
             print(f"Warning: Failed to load .env from {env_path}: {e}", file=sys.stderr)
             continue
+
+# ---------------------------------------------------------------------------
+# Runtime configuration — all values loaded from .env
+# ---------------------------------------------------------------------------
+def _require(key: str) -> str:
+    """Exit with a clear error if a required env var is not set."""
+    val = os.environ.get(key, "").strip()
+    if not val:
+        print(f"ERROR: '{key}' is required but not set in your .env file.", file=sys.stderr)
+        sys.exit(1)
+    return val
+
+
+ORIGIN_NETUID           = int(_require("ORIGIN_NETUID"))
+DEST_NETUID             = int(_require("DEST_NETUID"))
+ORIGIN_HOTKEY           = _require("ORIGIN_HOTKEY")
+DEST_HOTKEY             = _require("DEST_HOTKEY")
+WALLET_NAME             = _require("WALLET_NAME")
+MINIMUM_STAKE_THRESHOLD = float(os.environ.get("MINIMUM_STAKE_THRESHOLD", "0.001"))
 
 # Setup logging
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -450,19 +462,19 @@ Please check the logs for more details."""
                     is_due, period_start, period_end = sheets_logger.check_distribution_due()
                     if is_due:
                         current_balance = sheets_logger.get_current_balance()
-                        cfg = sheets_logger.config
-                        gtv_share = cfg.get("gtv_share", 0.5)
-                        ptn_share = cfg.get("ptn_share", 0.5)
-                        gtv_amount = current_balance * gtv_share
-                        ptn_amount = current_balance * ptn_share
+                        cfg     = sheets_logger.config
+                        partners = cfg.get("partners", [])
+                        partner_amounts = [
+                            round(current_balance * p["share"], 10)
+                            for p in partners
+                        ]
 
                         # Log pending distribution row
                         sheets_logger.log_distribution_pending(
                             period_start=period_start,
                             period_end=period_end,
                             total_balance=current_balance,
-                            gtv_amount=gtv_amount,
-                            ptn_amount=ptn_amount,
+                            partner_amounts=partner_amounts,
                         )
 
                         # Send distribution alert via Telegram
@@ -471,13 +483,16 @@ Please check the logs for more details."""
                                 period_start=period_start,
                                 period_end=period_end,
                                 total_balance=current_balance,
-                                gtv_amount=gtv_amount,
-                                ptn_amount=ptn_amount,
-                                gtv_wallet=cfg.get("gtv_wallet", ""),
-                                ptn_wallet=cfg.get("ptn_wallet", ""),
+                                partners=[
+                                    {"name": p["name"], "amount": a, "wallet": p["wallet"]}
+                                    for p, a in zip(partners, partner_amounts)
+                                ],
                                 sheet_url=sheets_logger.sheet_url,
                             )
-                        log(f"Distribution due: {current_balance:.4f} α → GTV {gtv_amount:.4f} | PTN {ptn_amount:.4f}")
+                        partner_summary = " | ".join(
+                            f"{p['name']} {a:.4f}" for p, a in zip(partners, partner_amounts)
+                        )
+                        log(f"Distribution due: {current_balance:.4f} α → {partner_summary}")
                 except Exception as e:
                     log(f"Warning: Distribution check failed: {e}")
 

@@ -20,44 +20,77 @@ from pathlib import Path
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.utils import rowcol_to_a1
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
-# Config
+# Load .env (same file used by daily_stake_move.py)
 # ---------------------------------------------------------------------------
-SA_FILE = str(Path(__file__).parent / "google-sheets-sa.json")
-SHEET_ID = "1_FvpOzJQRSR6x-5Q0fT7187-1yHlC37Ornb-j5hYqh0"
+for _p in [
+    Path(__file__).parent / ".env",
+    Path("/opt/stake-move-automation") / ".env",
+    Path.cwd() / ".env",
+]:
+    if _p.exists():
+        load_dotenv(_p)
+        break
+
+
+def _require(key: str) -> str:
+    val = os.environ.get(key, "").strip()
+    if not val:
+        print(f"ERROR: '{key}' is required but not set in your .env file.", file=sys.stderr)
+        sys.exit(1)
+    return val
+
+
+# ---------------------------------------------------------------------------
+# Config — all values from .env
+# ---------------------------------------------------------------------------
+SA_FILE   = _require("GOOGLE_SERVICE_ACCOUNT_JSON")
+SHEET_ID  = _require("GOOGLE_SHEET_ID")
 SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
 
-OPENING_BALANCE = 733.6
-OPENING_DATE = "2026-03-31"
+OPENING_BALANCE = float(_require("OPENING_BALANCE"))
+OPENING_DATE    = _require("OPENING_DATE")
 
-# Distribution config
-GTV_NAME = "GTV"
-GTV_SHARE = 0.5
-GTV_WALLET = "5EQvqYFsPijkS5V32vqzcMmQDV4Q167MEofmzFk6qH8W7byh"
-PTN_NAME = "PTN"
-PTN_SHARE = 0.5
-PTN_WALLET = "5F6tnxzAAxbhaWRmeUmB63JEM3VXBNSmqb3AwYJVDStQjw8y"
-FIRST_DIST_DATE = "2026-04-10"
-CYCLE_DAYS = 14
+PARTNER_COUNT = int(os.environ.get("PARTNER_COUNT", "2"))
+PARTNERS: list[dict] = []
+for _i in range(1, PARTNER_COUNT + 1):
+    _name   = os.environ.get(f"PARTNER_{_i}_NAME", f"Partner{_i}").strip()
+    _share  = float(os.environ.get(f"PARTNER_{_i}_SHARE", str(round(1 / PARTNER_COUNT, 6))))
+    _wallet = _require(f"PARTNER_{_i}_WALLET")
+    PARTNERS.append({"name": _name, "share": _share, "wallet": _wallet})
 
-# Old tab names → new archive names
-ARCHIVE_MAP = {
-    "Distribution": "[Archive] Distribution",
-    "Transactions": "[Archive] Transactions",
-    "Shares & Configs": "[Archive] Shares & Configs",
-}
+FIRST_DIST_DATE = _require("FIRST_DIST_DATE")
+CYCLE_DAYS      = int(os.environ.get("CYCLE_DAYS", "14"))
+
+# Tabs to rename as [Archive] before setup (comma-separated in env, empty = none)
+ARCHIVE_MAP: dict[str, str] = {}
+for _name in os.environ.get("ARCHIVE_TAB_NAMES", "").split(","):
+    _name = _name.strip()
+    if _name:
+        ARCHIVE_MAP[_name] = f"[Archive] {_name}"
 
 # New tab names (in display order)
-TAB_DASHBOARD = "Dashboard"
-TAB_SWEEPS = "Daily Sweeps"
+TAB_DASHBOARD     = "Dashboard"
+TAB_SWEEPS        = "Daily Sweeps"
 TAB_DISTRIBUTIONS = "Distributions"
-TAB_CONFIG = "Config"
+TAB_CONFIG        = "Config"
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def col_letter(idx: int) -> str:
+    """Convert 0-based column index to A, B, ..., Z, AA, AB, ..."""
+    result = ""
+    idx += 1
+    while idx:
+        idx, r = divmod(idx - 1, 26)
+        result = chr(65 + r) + result
+    return result
+
+
 def connect() -> gspread.Spreadsheet:
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -219,12 +252,15 @@ def setup_config(sh: gspread.Spreadsheet) -> gspread.Worksheet:
         ["Key", "Value", "Notes"],
         ["", "", ""],
         ["--- Partners ---", "", ""],
-        ["GTV_Name", GTV_NAME, ""],
-        ["GTV_Share", GTV_SHARE, "Decimal (0.5 = 50%)"],
-        ["GTV_Wallet", GTV_WALLET, ""],
-        ["PTN_Name", PTN_NAME, ""],
-        ["PTN_Share", PTN_SHARE, "Decimal (0.5 = 50%)"],
-        ["PTN_Wallet", PTN_WALLET, ""],
+        ["Partner_Count", PARTNER_COUNT, ""],
+    ]
+    for i, p in enumerate(PARTNERS, 1):
+        rows += [
+            [f"P{i}_Name",   p["name"],   ""],
+            [f"P{i}_Share",  p["share"],  "Decimal (0.5 = 50%)"],
+            [f"P{i}_Wallet", p["wallet"], ""],
+        ]
+    rows += [
         ["", "", ""],
         ["--- Distribution ---", "", ""],
         ["Cycle_Days", CYCLE_DAYS, "Days between distributions"],
@@ -237,6 +273,9 @@ def setup_config(sh: gspread.Spreadsheet) -> gspread.Worksheet:
         ["", "", ""],
         ["--- Links ---", "", ""],
         ["Sheet_URL", SHEET_URL, ""],
+        ["Dashboard_URL", "", "Auto-filled at end of setup"],
+        ["Distributions_URL", "", "Auto-filled at end of setup"],
+        ["Daily_Sweeps_URL", "", "Auto-filled at end of setup"],
     ]
 
     ws.update(rows, range_name="A1")
@@ -289,64 +328,75 @@ def setup_distributions(sh: gspread.Spreadsheet) -> gspread.Worksheet:
     ws = get_or_create_tab(sh, TAB_DISTRIBUTIONS, index=2)
     ws.clear()
 
-    headers = [
-        "Distribution Date",
-        "Period Start",
-        "Period End",
-        "Total Balance (α)",
-        "GTV Amount (α)",
-        "PTN Amount (α)",
-        "Status",
-        "GTV Tx Link",
-        "PTN Tx Link",
-        "Notes",
-    ]
+    N = len(PARTNERS)
+    status_col_idx  = 4 + N          # 0-based; "G" for N=2, "H" for N=3
+    tx_start_col_idx = status_col_idx + 1
+    total_cols = 4 + 2 * N + 2
+
+    headers = (
+        ["Distribution Date", "Period Start", "Period End", "Total Balance (α)"]
+        + [f"{p['name']} Amount (α)" for p in PARTNERS]
+        + ["Status"]
+        + [f"{p['name']} Tx Link" for p in PARTNERS]
+        + ["Notes"]
+    )
     ws.update([headers], range_name="A1")
 
     sid = ws.id
 
-    # Data validation on Status column (col G = index 6):
-    # Allow Pending freely. Allow Completed only if H and I are non-empty.
-    # gspread data validation uses a CUSTOM formula approach.
+    # Data validation: Status column only allows "Pending" freely;
+    # "Completed" requires every Tx Link column to be non-empty.
+    status_cell_ref = f"{col_letter(status_col_idx)}2"
+    tx_conditions   = ", ".join(
+        f'{col_letter(tx_start_col_idx + i)}2<>""'
+        for i in range(N)
+    )
+    validation_formula = (
+        f'=OR({status_cell_ref}="Pending",'
+        f'AND({status_cell_ref}="Completed",{tx_conditions}))'
+    )
+    partner_names_str = " and ".join(p["name"] for p in PARTNERS)
+
     status_validation_request = {
         "setDataValidation": {
             "range": {
                 "sheetId": sid,
                 "startRowIndex": 1,
                 "endRowIndex": 1000,
-                "startColumnIndex": 6,
-                "endColumnIndex": 7,
+                "startColumnIndex": status_col_idx,
+                "endColumnIndex": status_col_idx + 1,
             },
             "rule": {
                 "condition": {
                     "type": "CUSTOM_FORMULA",
-                    "values": [
-                        {
-                            "userEnteredValue": (
-                                '=OR(G2="Pending",'
-                                'AND(G2="Completed",H2<>"",I2<>""))'
-                            )
-                        }
-                    ],
+                    "values": [{"userEnteredValue": validation_formula}],
                 },
                 "showCustomUi": True,
                 "strict": True,
                 "inputMessage": (
-                    "Add both GTV and PTN transaction links before "
+                    f"Add all transaction links ({partner_names_str}) before "
                     "marking as Completed."
                 ),
             },
         }
     }
 
+    col_widths = (
+        [160, 130, 130, 180]   # Date, Period Start, Period End, Total Balance
+        + [180] * N             # Partner amount cols
+        + [110]                 # Status
+        + [280] * N             # Tx link cols
+        + [220]                 # Notes
+    )
     batch = (
-        bold_header_request(sid, 10, "#e65100")
-        + col_width_request(sid, [160, 130, 130, 180, 180, 180, 110, 280, 280, 220])
+        bold_header_request(sid, total_cols, "#e65100")
+        + col_width_request(sid, col_widths)
         + [
             date_format_request(sid, 0),
             date_format_request(sid, 1),
             date_format_request(sid, 2),
-            number_format_request(sid, 3, 6, 1, '#,##0.0000000000" α"'),
+            # Total Balance + all partner amount cols
+            number_format_request(sid, 3, 4 + N, 1, '#,##0.0000000000" α"'),
             status_validation_request,
         ]
     )
@@ -363,40 +413,52 @@ def setup_dashboard(sh: gspread.Spreadsheet):
     ws = get_or_create_tab(sh, TAB_DASHBOARD, index=0)
     ws.clear()
 
-    # All formulas reference the other sheets.
-    # Layout: col A = label, col B = value, col C = notes
-    rows = [
-        # --- Title row ---
+    N = len(PARTNERS)
+    status_col = col_letter(4 + N)   # "G" for N=2, "H" for N=3, etc.
+
+    # Use INDEX/MATCH for Config lookups so row positions don't break when
+    # partner count changes.
+    _conf_start_bal  = 'INDEX(Config!B:B,MATCH("Starting_Balance",Config!A:A,0))'
+    _conf_first_dist = 'INDEX(Config!B:B,MATCH("First_Distribution_Date",Config!A:A,0))'
+
+    rows: list = [
+        # --- Title ---
         ["SN35 Distribution Dashboard", "", ""],
         ["", "", ""],
 
         # --- Balance ---
         ["BALANCE", "", ""],
         ["Current Balance",
-         f"=Config!B17+SUMIF('Daily Sweeps'!D:D,\"<>Opening balance\",'Daily Sweeps'!B:B)-SUMIF(Distributions!G:G,\"Completed\",Distributions!D:D)",
+         f"={_conf_start_bal}"
+         f"+SUMIF('Daily Sweeps'!D:D,\"<>Opening balance\",'Daily Sweeps'!B:B)"
+         f"-SUMIF(Distributions!{status_col}:{status_col},\"Completed\",Distributions!D:D)",
          "Starting balance + all sweeps - completed distributions"],
-        ["Starting Balance", f"=Config!B17", ""],
+        ["Starting Balance", f"={_conf_start_bal}", ""],
         ["Total Earned (all sweeps)",
          "=SUMIF('Daily Sweeps'!D:D,\"<>Opening balance\",'Daily Sweeps'!B:B)",
          ""],
         ["Total Distributed",
-         "=SUMIF(Distributions!G:G,\"Completed\",Distributions!D:D)",
+         f"=SUMIF(Distributions!{status_col}:{status_col},\"Completed\",Distributions!D:D)",
          "Completed distributions only"],
         ["", "", ""],
 
         # --- Next Distribution ---
         ["NEXT DISTRIBUTION", "", ""],
         ["Next Distribution Date",
-         f'=Config!B13+CEILING(TODAY()-Config!B13,{CYCLE_DAYS})',
+         f"={_conf_first_dist}+CEILING(TODAY()-{_conf_first_dist},{CYCLE_DAYS})",
          "Auto-calculated from first dist date + cycle"],
         ["Days Until Distribution",
-         f'=Config!B13+CEILING(TODAY()-Config!B13,{CYCLE_DAYS})-TODAY()',
+         f"={_conf_first_dist}+CEILING(TODAY()-{_conf_first_dist},{CYCLE_DAYS})-TODAY()",
          ""],
         ["Days Into Current Period",
-         f"=MOD(TODAY()-Config!B13,{CYCLE_DAYS})",
+         f"=MOD(TODAY()-{_conf_first_dist},{CYCLE_DAYS})",
          f"Out of {CYCLE_DAYS} days"],
         ["Projected Distribution Amount",
-         f"=Config!B17+SUMIF('Daily Sweeps'!D:D,\"<>Opening balance\",'Daily Sweeps'!B:B)-SUMIF(Distributions!G:G,\"Completed\",Distributions!D:D)+(IFERROR(AVERAGE(QUERY('Daily Sweeps'!A:B,\"select B where A >= date '\"&TEXT(TODAY()-14,\"yyyy-mm-dd\")&\"' and B > 0\",0)),0)*({CYCLE_DAYS}-MOD(TODAY()-Config!B13,{CYCLE_DAYS})))",
+         f"={_conf_start_bal}"
+         f"+SUMIF('Daily Sweeps'!D:D,\"<>Opening balance\",'Daily Sweeps'!B:B)"
+         f"-SUMIF(Distributions!{status_col}:{status_col},\"Completed\",Distributions!D:D)"
+         f"+(IFERROR(AVERAGE(QUERY('Daily Sweeps'!A:B,\"select B where A >= date '\"&TEXT(TODAY()-14,\"yyyy-mm-dd\")&\"' and B > 0\",0)),0)"
+         f"*({CYCLE_DAYS}-MOD(TODAY()-{_conf_first_dist},{CYCLE_DAYS})))",
          "Current balance + (14-day avg × days remaining)"],
         ["", "", ""],
 
@@ -419,14 +481,17 @@ def setup_dashboard(sh: gspread.Spreadsheet):
          "Days in a row with a successful sweep"],
         ["", "", ""],
 
-        # --- Partners ---
+        # --- Partners (dynamic) ---
         ["PARTNERS", "", ""],
-        ["GTV Total Received",
-         "=SUMIF(Distributions!G:G,\"Completed\",Distributions!E:E)",
-         f"Wallet: {GTV_WALLET}"],
-        ["PTN Total Received",
-         "=SUMIF(Distributions!G:G,\"Completed\",Distributions!F:F)",
-         f"Wallet: {PTN_WALLET}"],
+    ]
+    for i, p in enumerate(PARTNERS):
+        amount_col = col_letter(4 + i)
+        rows.append([
+            f"{p['name']} Total Received",
+            f'=SUMIF(Distributions!{status_col}:{status_col},"Completed",Distributions!{amount_col}:{amount_col})',
+            f"Wallet: {p['wallet']}",
+        ])
+    rows += [
         ["", "", ""],
 
         # --- Last Sweep ---
@@ -442,10 +507,10 @@ def setup_dashboard(sh: gspread.Spreadsheet):
         # --- Distributions Summary ---
         ["DISTRIBUTIONS", "", ""],
         ["Total Distributions Completed",
-         "=COUNTIF(Distributions!G:G,\"Completed\")",
+         f"=COUNTIF(Distributions!{status_col}:{status_col},\"Completed\")",
          ""],
         ["Total Distributions Pending",
-         "=COUNTIF(Distributions!G:G,\"Pending\")",
+         f"=COUNTIF(Distributions!{status_col}:{status_col},\"Pending\")",
          ""],
         ["", "", ""],
 
@@ -585,6 +650,33 @@ def setup_dashboard(sh: gspread.Spreadsheet):
 
 
 # ---------------------------------------------------------------------------
+# Step 6: Back-fill tab URLs into Config (needs real GIDs from created tabs)
+# ---------------------------------------------------------------------------
+def update_config_urls(sh: gspread.Spreadsheet):
+    """Write the correct per-tab URLs into Config after all tabs are created."""
+    print("\n[6] Updating Config tab with tab URLs...")
+    cfg = sh.worksheet(TAB_CONFIG)
+
+    # Fetch real GIDs from the live spreadsheet
+    tab_gids = {ws.title: ws.id for ws in sh.worksheets()}
+
+    url_rows = {
+        "Dashboard_URL": f"{SHEET_URL}/edit#gid={tab_gids.get(TAB_DASHBOARD, '')}",
+        "Distributions_URL": f"{SHEET_URL}/edit#gid={tab_gids.get(TAB_DISTRIBUTIONS, '')}",
+        "Daily_Sweeps_URL": f"{SHEET_URL}/edit#gid={tab_gids.get(TAB_SWEEPS, '')}",
+    }
+
+    # Find each key row and update col B in-place
+    all_rows = cfg.get_all_values()
+    for i, row in enumerate(all_rows, start=1):
+        if row and row[0].strip() in url_rows:
+            cfg.update_cell(i, 2, url_rows[row[0].strip()])
+            print(f"  Updated {row[0].strip()} → {url_rows[row[0].strip()]}")
+
+    print("  Config URLs updated.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -599,6 +691,7 @@ def main():
     setup_daily_sweeps(sh)
     setup_distributions(sh)
     setup_dashboard(sh)
+    update_config_urls(sh)
 
     print("\n" + "=" * 60)
     print("Setup complete!")

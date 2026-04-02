@@ -1,161 +1,238 @@
-# SN35 Stake Move Automation
+# Bittensor Stake-Move Automation
 
-Runs daily at **8AM PST** on a GCP VM. Sweeps stake from the SN35 owner hotkey into the RT21 destination, logs every sweep to Google Sheets, sends Telegram notifications, and alerts on bi-weekly distribution Fridays.
+Runs daily on a Linux VM (via systemd timer). Each run sweeps accumulated stake from an **origin hotkey** into a **destination hotkey**, logs every sweep to Google Sheets, and sends Telegram notifications — including alerts on bi-weekly distribution days.
+
+> Originally built for SN35 (GTV & PTN). Now fully configurable — zero hardcoded values.
 
 ---
 
-## Stack
+## How it works
 
-| What | Detail |
+```
+systemd timer (8 AM local)
+  → daily_stake_move.py
+      → btcli  : move stake from ORIGIN_HOTKEY → DEST_HOTKEY
+      → sheets : log balance, sweep amount, running total
+      → telegram: notify on sweep or skip; alert on distribution days
+```
+
+---
+
+## What you need before starting
+
+| Requirement | Notes |
 |---|---|
-| VM | `sn35-stake-automation` · `us-central1-a` · project `bittensor1` |
-| Script | `/opt/stake-move-automation/daily_stake_move.py` |
-| Schedule | systemd timer — `8:00 AM America/Los_Angeles` daily |
-| Logs | `/var/log/stake-move/YYYY-MM-DD.log` |
-| Sheet | [SN35 Distribution (GTV & PTN)](https://docs.google.com/spreadsheets/d/1_FvpOzJQRSR6x-5Q0fT7187-1yHlC37Ornb-j5hYqh0) |
+| Linux VM (Ubuntu 22.04+) | Any cloud provider works |
+| Python 3.10+ | Usually pre-installed |
+| `btcli` installed | `pip install bittensor` |
+| A Bittensor wallet on the VM | Cold-key + hot-keys already registered |
+| (Optional) Telegram bot | Create via [@BotFather](https://t.me/BotFather) |
+| (Optional) Google Sheet + service account | For sweep logging |
 
 ---
 
-## First-Time Deploy
+## Setup guide
+
+### 1. Clone the repo on your VM
 
 ```bash
-# 1. SSH into the VM
-gcloud compute ssh sn35-stake-automation --project=bittensor1 --zone=us-central1-a
-
-# 2. Clone the repo
-sudo git clone git@github.com:General-Tao-Ventures/sn35_emission_move.git /opt/stake-move-automation
-
-# 3. Install dependencies
+sudo git clone https://github.com/your-org/stake-move-automation.git /opt/stake-move-automation
 cd /opt/stake-move-automation
 sudo pip3 install -r requirements.txt
+```
 
-# 4. Create .env (copy example and fill in values)
+### 2. Create your `.env` file
+
+```bash
 sudo cp env.example .env
 sudo nano .env
+```
 
-# 5. Copy service account JSON (never committed to git)
-#    Upload your google-sheets-sa.json to the VM:
-#    (run this locally)
-gcloud compute scp ~/path/to/google-sheets-sa.json \
-  sn35-stake-automation:/opt/stake-move-automation/google-sheets-sa.json \
-  --project=bittensor1 --zone=us-central1-a
+Fill in all values — there are four sections:
+
+| Section | Required for |
+|---|---|
+| Wallet & Network | Daily automation (always required) |
+| Telegram | Notifications (optional) |
+| Google Sheets | Sweep logging (optional) |
+| Sheet Setup | One-time `setup_sheets.py` run only |
+
+See [`.env` Reference](#env-reference) below for every variable.
+
+### 3. (If using Google Sheets) Copy service-account credentials
+
+The JSON file is **never committed to git**. Copy it to the VM manually:
+
+```bash
+# Run this on your local machine
+scp ~/path/to/google-sheets-sa.json user@your-vm:/opt/stake-move-automation/google-sheets-sa.json
+
+# Then on the VM
 sudo chmod 600 /opt/stake-move-automation/google-sheets-sa.json
+```
 
-# 6. Install systemd service and timer
+Make sure `GOOGLE_SERVICE_ACCOUNT_JSON` in `.env` points to this path, and that the service account has **Editor** access to your sheet.
+
+### 4. (If using Google Sheets) Set up the sheet structure
+
+Run this **once**, locally or on the VM, with the Sheet Setup section of `.env` filled in:
+
+```bash
+python3 setup_sheets.py
+```
+
+This creates four tabs: `Dashboard`, `Daily Sweeps`, `Distributions`, `Config`.  
+After it runs you no longer need the Sheet Setup variables for daily operation.
+
+### 5. Install the systemd service
+
+```bash
+# Either use the automated deploy script:
+sudo bash deploy.sh
+
+# Or manually:
 sudo cp stake-move.service /etc/systemd/system/
 sudo cp stake-move.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now stake-move.timer
-
-# 7. (One-time) Set up the Google Sheet structure
-#    Run this locally from the repo root:
-python3 setup_sheets.py
 ```
+
+The timer fires daily at **8:00 AM** in the VM's local timezone.
 
 ---
 
-## Redeploy After Changes
-
-Run this **locally** from the repo root after pushing to `main`:
+## Verify everything is running
 
 ```bash
-# Pull latest and copy changed files to VM
-gcloud compute ssh sn35-stake-automation --project=bittensor1 --zone=us-central1-a --command="
-  cd /opt/stake-move-automation && sudo git pull origin main && sudo pip3 install -r requirements.txt -q
-"
-
-# Restart the timer to pick up changes
-gcloud compute ssh sn35-stake-automation --project=bittensor1 --zone=us-central1-a --command="
-  sudo systemctl restart stake-move.timer
-"
-```
-
-Or as a one-liner:
-
-```bash
-gcloud compute ssh sn35-stake-automation --project=bittensor1 --zone=us-central1-a \
-  --command="cd /opt/stake-move-automation && sudo git pull origin main && sudo pip3 install -r requirements.txt -q && sudo systemctl restart stake-move.timer && echo 'Done'"
-```
-
----
-
-## Check Everything is Running
-
-```bash
-# SSH in first
-gcloud compute ssh sn35-stake-automation --project=bittensor1 --zone=us-central1-a
-```
-
-```bash
-# 1. Is the timer active and when does it next fire?
+# Is the timer active?
 sudo systemctl status stake-move.timer
 
-# 2. What did the last run do?
+# What did the last run do?
 sudo systemctl status stake-move.service
 
-# 3. Full log for today
+# Full log for today
 sudo cat /var/log/stake-move/$(date +%Y-%m-%d).log
 
-# 4. Summary of all past runs (one line per run)
+# One-line summary of every past run
 sudo cat /var/log/stake-move/summary.log
 
-# 5. Journal logs (real-time, last 50 lines)
-sudo journalctl -u stake-move.service -n 50
-
-# 6. Watch live as the job runs (useful at 8AM)
+# Live journal output (useful during a run)
 sudo journalctl -u stake-move.service -f
 ```
 
-**Expected output from `systemctl status stake-move.timer`:**
+Expected timer status:
 ```
-● stake-move.timer - Daily Stake Move Timer (8AM PST)
+● stake-move.timer - Daily Stake Move Timer
      Active: active (waiting)
-    Trigger: 2026-04-02 15:00:00 UTC; Xh left
-   Triggers: ● stake-move.service
+    Trigger: 2026-04-03 15:00:00 UTC; Xh left
 ```
-
-> If `Active` shows anything other than `active (waiting)` — re-run:
-> `sudo systemctl enable --now stake-move.timer`
 
 ---
 
-## Manually Trigger a Run
+## Manually trigger a run
 
 ```bash
 sudo systemctl start stake-move.service
-# Then watch the output:
 sudo journalctl -u stake-move.service -f
 ```
 
 ---
 
-## .env Reference
+## Redeploy after code changes
 
 ```bash
-# /opt/stake-move-automation/.env
-
-WALLET_PASSWORD=your_coldkey_password
-
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-
-GOOGLE_SERVICE_ACCOUNT_JSON=/opt/stake-move-automation/google-sheets-sa.json
-GOOGLE_SHEET_ID=1_FvpOzJQRSR6x-5Q0fT7187-1yHlC37Ornb-j5hYqh0
+# On the VM
+cd /opt/stake-move-automation
+sudo git pull origin main
+sudo pip3 install -r requirements.txt -q
+sudo systemctl restart stake-move.timer
 ```
 
-> `google-sheets-sa.json` is **not in git** — copy it manually to the VM (see First-Time Deploy step 5).
+Or as a one-liner from your local machine:
+
+```bash
+ssh user@your-vm "cd /opt/stake-move-automation && sudo git pull origin main && sudo pip3 install -r requirements.txt -q && sudo systemctl restart stake-move.timer && echo Done"
+```
 
 ---
 
-## Key Files
+## `.env` Reference
+
+### Section 1 — Wallet & Network _(required)_
+
+| Variable | Description |
+|---|---|
+| `WALLET_NAME` | Name of the Bittensor cold-key wallet on the VM |
+| `WALLET_PASSWORD` | Password for that cold-key |
+| `ORIGIN_NETUID` | Subnet UID of the hotkey to sweep **from** |
+| `DEST_NETUID` | Subnet UID of the hotkey to sweep **into** (can equal `ORIGIN_NETUID`) |
+| `ORIGIN_HOTKEY` | SS58 address of the source hotkey |
+| `DEST_HOTKEY` | SS58 address of the destination hotkey |
+| `MINIMUM_STAKE_THRESHOLD` | Skip the sweep if stake below this (α). Default: `0.001` |
+
+### Section 2 — Telegram _(optional)_
+
+| Variable | Description |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Token from @BotFather |
+| `TELEGRAM_CHAT_ID` | Chat ID to send messages to |
+
+### Section 3 — Google Sheets _(optional)_
+
+| Variable | Description |
+|---|---|
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Absolute path to service-account `.json` on the VM |
+| `GOOGLE_SHEET_ID` | The ID part of your sheet URL (`/d/<ID>/`) |
+
+### Section 4 — Sheet Setup _(only for `setup_sheets.py`)_
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENING_BALANCE` | — | Starting TAO balance (numeric) |
+| `OPENING_DATE` | — | Date tracking began (`YYYY-MM-DD`) |
+| `GTV_NAME` | `GTV` | Partner A display name |
+| `GTV_SHARE` | `0.5` | Partner A share (0–1) |
+| `GTV_WALLET` | — | Partner A SS58 wallet address |
+| `PTN_NAME` | `PTN` | Partner B display name |
+| `PTN_SHARE` | `0.5` | Partner B share (0–1) |
+| `PTN_WALLET` | — | Partner B SS58 wallet address |
+| `FIRST_DIST_DATE` | — | First distribution date (`YYYY-MM-DD`) |
+| `CYCLE_DAYS` | `14` | Days between distributions |
+| `ARCHIVE_TAB_NAMES` | _(empty)_ | Comma-separated legacy tab names to rename as `[Archive] …` |
+
+---
+
+## Key files
 
 ```
-daily_stake_move.py      # Main script
-utils/sheets_logger.py   # Google Sheets read/write
-utils/telegram_notifier.py # Telegram notifications
-setup_sheets.py          # One-time Sheet initialisation (run locally)
-add_charts.py            # Add/refresh Dashboard charts (run locally when ready)
-stake-move.service       # Systemd service unit
-stake-move.timer         # Systemd timer unit (8AM PST daily)
-env.example              # .env template
+daily_stake_move.py        Main automation script (run by systemd)
+setup_sheets.py            One-time Google Sheet initialisation
+utils/sheets_logger.py     Google Sheets read/write helpers
+utils/telegram_notifier.py Telegram notification helpers
+stake-move.service         Systemd service unit
+stake-move.timer           Systemd timer unit
+deploy.sh                  Interactive deployment helper
+diagnose.sh                Troubleshooting helper
+env.example                .env template (copy → .env, fill in)
+requirements.txt           Python dependencies
 ```
+
+---
+
+## Troubleshooting
+
+Run the diagnostic script for a structured overview:
+
+```bash
+sudo bash diagnose.sh
+```
+
+Common issues:
+
+| Symptom | Check |
+|---|---|
+| `'ORIGIN_HOTKEY' is required but not set` | `.env` is missing that variable |
+| `btcli` not found | Add `~/.local/bin` to PATH in `stake-move.service` |
+| Sweep skipped every day | `MINIMUM_STAKE_THRESHOLD` may be too high |
+| Sheet not updating | Service account lacks Editor access to the sheet |
+| Timer not firing | `sudo systemctl enable --now stake-move.timer` |

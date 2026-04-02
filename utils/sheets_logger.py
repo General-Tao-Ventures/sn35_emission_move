@@ -36,18 +36,13 @@ TAB_DISTRIBUTIONS = "Distributions"
 # Config key names (must match setup_sheets.py)
 CONFIG_KEYS = {
     "starting_balance": "Starting_Balance",
-    "opening_date": "Opening_Date",
-    "cycle_days": "Cycle_Days",
-    "first_dist_date": "First_Distribution_Date",
-    "gtv_share": "GTV_Share",
-    "ptn_share": "PTN_Share",
-    "gtv_wallet": "GTV_Wallet",
-    "ptn_wallet": "PTN_Wallet",
-    "gtv_name": "GTV_Name",
-    "ptn_name": "PTN_Name",
-    "sheet_url": "Sheet_URL",
-    "dashboard_url": "Dashboard_URL",
-    "distributions_url": "Distributions_URL",
+    "opening_date":     "Opening_Date",
+    "cycle_days":       "Cycle_Days",
+    "first_dist_date":  "First_Distribution_Date",
+    "partner_count":    "Partner_Count",
+    "sheet_url":        "Sheet_URL",
+    "dashboard_url":    "Dashboard_URL",
+    "distributions_url":"Distributions_URL",
     "daily_sweeps_url": "Daily_Sweeps_URL",
 }
 
@@ -92,23 +87,25 @@ class SheetsLogger:
         ws = self._sh.worksheet(TAB_CONFIG)
         rows = ws.get_all_values()
         raw = {row[0].strip(): row[1].strip() for row in rows if len(row) >= 2 and row[0].strip()}
-        # Map to typed values
         try:
+            partner_count = int(raw.get(CONFIG_KEYS["partner_count"], "2"))
+            partners: list[dict] = []
+            for i in range(1, partner_count + 1):
+                partners.append({
+                    "name":   raw.get(f"P{i}_Name",   f"P{i}"),
+                    "share":  float(raw.get(f"P{i}_Share",  str(round(1 / partner_count, 6)))),
+                    "wallet": raw.get(f"P{i}_Wallet", ""),
+                })
             self._config = {
                 "starting_balance": float(raw.get(CONFIG_KEYS["starting_balance"], 0)),
-                "opening_date": raw.get(CONFIG_KEYS["opening_date"], "2026-03-31"),
-                "cycle_days": int(raw.get(CONFIG_KEYS["cycle_days"], 14)),
-                "first_dist_date": raw.get(CONFIG_KEYS["first_dist_date"], "2026-04-10"),
-                "gtv_share": float(raw.get(CONFIG_KEYS["gtv_share"], 0.5)),
-                "ptn_share": float(raw.get(CONFIG_KEYS["ptn_share"], 0.5)),
-                "gtv_wallet": raw.get(CONFIG_KEYS["gtv_wallet"], ""),
-                "ptn_wallet": raw.get(CONFIG_KEYS["ptn_wallet"], ""),
-                "gtv_name": raw.get(CONFIG_KEYS["gtv_name"], "GTV"),
-                "ptn_name": raw.get(CONFIG_KEYS["ptn_name"], "PTN"),
-                "sheet_url": raw.get(CONFIG_KEYS["sheet_url"], ""),
-                "dashboard_url": raw.get(CONFIG_KEYS["dashboard_url"], ""),
-                "distributions_url": raw.get(CONFIG_KEYS["distributions_url"], ""),
-                "daily_sweeps_url": raw.get(CONFIG_KEYS["daily_sweeps_url"], ""),
+                "opening_date":     raw.get(CONFIG_KEYS["opening_date"],    "2026-03-31"),
+                "cycle_days":       int(raw.get(CONFIG_KEYS["cycle_days"],  14)),
+                "first_dist_date":  raw.get(CONFIG_KEYS["first_dist_date"], "2026-04-10"),
+                "partners":         partners,
+                "sheet_url":        raw.get(CONFIG_KEYS["sheet_url"],         ""),
+                "dashboard_url":    raw.get(CONFIG_KEYS["dashboard_url"],     ""),
+                "distributions_url":raw.get(CONFIG_KEYS["distributions_url"], ""),
+                "daily_sweeps_url": raw.get(CONFIG_KEYS["daily_sweeps_url"],  ""),
             }
         except Exception as e:
             logger.warning(f"Config parse warning: {e}")
@@ -181,9 +178,11 @@ class SheetsLogger:
             # Sum completed distributions
             dist_ws = self._sh.worksheet(TAB_DISTRIBUTIONS)
             dist_rows = dist_ws.get_all_values()[1:]  # skip header
+            partners = self._config.get("partners", [{}, {}])
+            status_col = 4 + len(partners)   # 0-based index
             total_dist = sum(
                 _parse_float(r[3]) for r in dist_rows
-                if len(r) >= 7 and r[6].strip().lower() == "completed" and r[3]
+                if len(r) > status_col and r[status_col].strip().lower() == "completed" and r[3]
             )
 
             balance = starting + total_sweeps - total_dist
@@ -256,41 +255,44 @@ class SheetsLogger:
         period_start: date,
         period_end: date,
         total_balance: float,
-        gtv_amount: float,
-        ptn_amount: float,
+        partner_amounts: list[float],
     ) -> bool:
         """
         Append a Pending row to the Distributions tab.
-        Returns True on success.
+        partner_amounts must have one entry per partner in the same order as the
+        Config tab (P1, P2, ...).  Returns True on success.
         """
         if not self._connected:
             return False
         try:
             ws = self._sh.worksheet(TAB_DISTRIBUTIONS)
 
+            # Determine status column dynamically
+            n_partners  = len(partner_amounts)
+            status_col  = 4 + n_partners   # 0-based
+
             # Guard: don't log a duplicate Pending for the same date
             existing = ws.get_all_values()[1:]
             for row in existing:
-                if row and row[0].strip() == str(period_end) and len(row) >= 7 and row[6].strip() == "Pending":
+                if not row or row[0].strip() != str(period_end):
+                    continue
+                row_status = row[status_col].strip() if len(row) > status_col else ""
+                if row_status == "Pending":
                     logger.info(f"Distribution Pending row for {period_end} already exists — skipping duplicate.")
                     return True
 
-            new_row = [
-                str(period_end),
-                str(period_start),
-                str(period_end),
-                round(total_balance, 10),
-                round(gtv_amount, 10),
-                round(ptn_amount, 10),
-                "Pending",
-                "",  # GTV Tx Link
-                "",  # PTN Tx Link
-                "",  # Notes
-            ]
+            new_row = (
+                [str(period_end), str(period_start), str(period_end), round(total_balance, 10)]
+                + [round(a, 10) for a in partner_amounts]
+                + ["Pending"]
+                + ["" for _ in partner_amounts]   # Tx Link placeholders
+                + [""]                             # Notes
+            )
             ws.append_row(new_row, value_input_option="USER_ENTERED")
+            amounts_str = " | ".join(f"{a:.4f}" for a in partner_amounts)
             logger.info(
                 f"Logged Pending distribution: {period_end} | "
-                f"total={total_balance:.4f} α | GTV={gtv_amount:.4f} | PTN={ptn_amount:.4f}"
+                f"total={total_balance:.4f} α | partners=[{amounts_str}]"
             )
             return True
         except Exception as e:
@@ -309,7 +311,7 @@ class SheetsLogger:
           current_balance, total_earned, period_day, cycle_days,
           next_dist_date, days_until_dist,
           avg_7d, avg_14d,
-          projected_dist, gtv_projected, ptn_projected,
+          projected_dist, partners_projected,
           dashboard_url, distributions_url, daily_sweeps_url
         """
         stats = {
@@ -322,8 +324,7 @@ class SheetsLogger:
             "avg_7d": 0.0,
             "avg_14d": 0.0,
             "projected_dist": 0.0,
-            "gtv_projected": 0.0,
-            "ptn_projected": 0.0,
+            "partners_projected": [],   # [{"name": "GTV", "projected": 0.0}, ...]
             "dashboard_url": self._config.get("dashboard_url", ""),
             "distributions_url": self._config.get("distributions_url", ""),
             "daily_sweeps_url": self._config.get("daily_sweeps_url", ""),
@@ -334,8 +335,7 @@ class SheetsLogger:
         try:
             today = date.today()
             cycle = self._config.get("cycle_days", 14)
-            gtv_share = self._config.get("gtv_share", 0.5)
-            ptn_share = self._config.get("ptn_share", 0.5)
+            partners = self._config.get("partners", [])
 
             # All sweep rows (skip header + opening balance)
             sweeps_ws = self._sh.worksheet(TAB_SWEEPS)
@@ -348,12 +348,13 @@ class SheetsLogger:
             # Total earned from real sweeps
             total_earned = sum(_parse_float(r[1]) for r in real_sweeps if r[1])
 
-            # Completed distributions
+            # Completed distributions (status column is dynamic)
             dist_ws = self._sh.worksheet(TAB_DISTRIBUTIONS)
             dist_rows = dist_ws.get_all_values()[1:]
+            status_col = 4 + len(partners)
             total_dist = sum(
                 _parse_float(r[3]) for r in dist_rows
-                if len(r) >= 7 and r[6].strip().lower() == "completed" and r[3]
+                if len(r) > status_col and r[status_col].strip().lower() == "completed" and r[3]
             )
 
             current_balance = self._config.get("starting_balance", 0.0) + total_earned - total_dist
@@ -400,8 +401,10 @@ class SheetsLogger:
                 "avg_7d": round(avg_7d, 4),
                 "avg_14d": round(avg_14d, 4),
                 "projected_dist": round(projected, 4),
-                "gtv_projected": round(projected * gtv_share, 4),
-                "ptn_projected": round(projected * ptn_share, 4),
+                "partners_projected": [
+                    {"name": p["name"], "projected": round(projected * p["share"], 4)}
+                    for p in partners
+                ],
             })
         except Exception as e:
             logger.warning(f"get_sweep_stats error: {e}")
@@ -427,11 +430,15 @@ class SheetsLogger:
             ws = self._sh.worksheet(TAB_DISTRIBUTIONS)
             rows = ws.get_all_values()[1:]  # skip header
 
+            partners = self._config.get("partners", [])
+            status_col  = 4 + len(partners)   # 0-based
+            tx_start_col = status_col + 1
+
             pending = []
             for row in rows:
-                if len(row) < 7:
+                if len(row) <= status_col:
                     continue
-                if row[6].strip().lower() != "pending":
+                if row[status_col].strip().lower() != "pending":
                     continue
                 try:
                     dist_date = self._parse_date(row[0])
@@ -440,20 +447,25 @@ class SheetsLogger:
                 if dist_date >= today:
                     continue  # not overdue yet
 
-                gtv_link = row[7].strip() if len(row) > 7 else ""
-                ptn_link = row[8].strip() if len(row) > 8 else ""
-                has_tx_links = bool(gtv_link and ptn_link)
+                partner_data = []
+                for i, p in enumerate(partners):
+                    amount_col = 4 + i
+                    tx_col     = tx_start_col + i
+                    partner_data.append({
+                        "name":    p["name"],
+                        "amount":  row[amount_col].strip() if len(row) > amount_col else "",
+                        "tx_link": row[tx_col].strip()     if len(row) > tx_col     else "",
+                        "wallet":  p.get("wallet", ""),
+                    })
+                has_tx_links = all(pd["tx_link"] for pd in partner_data)
 
                 pending.append({
-                    "date": dist_date,
+                    "date":         dist_date,
                     "period_start": row[1].strip(),
-                    "period_end": row[2].strip(),
-                    "total": row[3].strip(),
-                    "gtv": row[4].strip(),
-                    "ptn": row[5].strip(),
+                    "period_end":   row[2].strip(),
+                    "total":        row[3].strip(),
+                    "partners":     partner_data,
                     "has_tx_links": has_tx_links,
-                    "gtv_link": gtv_link,
-                    "ptn_link": ptn_link,
                 })
 
             if pending:
