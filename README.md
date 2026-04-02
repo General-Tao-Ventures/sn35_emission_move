@@ -33,7 +33,40 @@ systemd timer (8 AM local)
 
 ## Setup guide
 
-### 1. Clone the repo on your VM
+### Option A — Automated (recommended)
+
+`deploy.sh` does everything in one go: installs system packages and Python deps, walks you through every `.env` value interactively, copies the service-account JSON, installs the systemd units, and runs a post-install health check.
+
+```bash
+# 1. Clone the repo on your VM
+git clone https://github.com/General-Tao-Ventures/stake_move_automation.git /opt/stake-move-automation
+cd /opt/stake-move-automation
+
+# 2. (If using Google Sheets) copy your service-account JSON to the VM first:
+#    scp ~/path/to/google-sheets-sa.json user@your-vm:/opt/stake-move-automation/
+
+# 3. Run the deploy script — it will prompt for all configuration values
+sudo bash deploy.sh
+```
+
+The script creates `/opt/stake-move-automation/.env` from your answers and enables the timer.
+
+After it finishes, if you are using Google Sheets, run the **one-time sheet setup**:
+
+```bash
+python3 /opt/stake-move-automation/setup_sheets.py
+```
+
+This creates four tabs: `Dashboard`, `Daily Sweeps`, `Distributions`, `Config`. You only need to do this once.
+
+---
+
+### Option B — Manual step-by-step
+
+<details>
+<summary>Expand manual steps</summary>
+
+#### 1. Clone and install dependencies
 
 ```bash
 git clone https://github.com/General-Tao-Ventures/stake_move_automation.git /opt/stake-move-automation
@@ -41,13 +74,14 @@ cd /opt/stake-move-automation
 sudo pip3 install -r requirements.txt
 ```
 
-### 2. Create your `.env` file
+#### 2. Create your `.env` file
 
 ```bash
 sudo cp env.example .env
+sudo nano .env   # fill in all values
 ```
 
-Fill in all values — there are four sections:
+There are four sections:
 
 | Section | Required for |
 |---|---|
@@ -58,12 +92,12 @@ Fill in all values — there are four sections:
 
 See [`.env` Reference](#env-reference) below for every variable.
 
-### 3. (If using Google Sheets) Copy service-account credentials
+#### 3. (If using Google Sheets) Copy service-account credentials
 
 The JSON file is **never committed to git**. Copy it to the VM manually:
 
 ```bash
-# Run this on your local machine
+# On your local machine
 scp ~/path/to/google-sheets-sa.json user@your-vm:/opt/stake-move-automation/google-sheets-sa.json
 
 # Then on the VM
@@ -72,9 +106,7 @@ sudo chmod 600 /opt/stake-move-automation/google-sheets-sa.json
 
 Make sure `GOOGLE_SERVICE_ACCOUNT_JSON` in `.env` points to this path, and that the service account has **Editor** access to your sheet.
 
-### 4. (If using Google Sheets) Set up the sheet structure
-
-Run this **once**, locally or on the VM, with the Sheet Setup section of `.env` filled in:
+#### 4. (If using Google Sheets) Set up the sheet structure
 
 ```bash
 python3 setup_sheets.py
@@ -83,18 +115,16 @@ python3 setup_sheets.py
 This creates four tabs: `Dashboard`, `Daily Sweeps`, `Distributions`, `Config`.  
 After it runs you no longer need the Sheet Setup variables for daily operation.
 
-### 5. Install the systemd service
+#### 5. Install the systemd service
 
 ```bash
-# Either use the automated deploy script:
-sudo bash deploy.sh
-
-# Or manually:
 sudo cp stake-move.service /etc/systemd/system/
 sudo cp stake-move.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now stake-move.timer
 ```
+
+</details>
 
 The timer fires daily at **8:00 AM** in the VM's local timezone.
 
