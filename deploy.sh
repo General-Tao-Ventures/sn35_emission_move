@@ -201,17 +201,24 @@ if [ -n "$USER_HOME" ] && [ "$SERVICE_USER" != "root" ]; then
     log_info "Updated PATH in service file to include $USER_HOME/.local/bin"
 fi
 
-# Function to mask secret value for display
+# Mask a secret for display (show first/last chars only)
 mask_secret() {
     local secret="$1"
     local len=${#secret}
-    if [ $len -le 8 ]; then
+    if [ "$len" -le 4 ]; then
         echo "****"
-    elif [ $len -le 16 ]; then
-        echo "${secret:0:4}****${secret: -4}"
+    elif [ "$len" -le 16 ]; then
+        echo "${secret:0:3}****${secret: -3}"
     else
-        echo "${secret:0:6}****${secret: -6}"
+        echo "${secret:0:5}****${secret: -5}"
     fi
+}
+
+# Read a single value from the current .env file (empty string if not found)
+_get_env_val() {
+    local key="$1"
+    [ -f "$ENV_FILE" ] || { echo ""; return; }
+    grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-
 }
 
 # Set up .env file
@@ -219,63 +226,182 @@ log_info ""
 log_info "Setting up .env file..."
 
 # Collect all inputs then write the file once.
+# When .env already exists, existing values are shown as defaults so the user
+# can press Enter to keep them or type a new value to override.
 _collect_and_write_env() {
+    local _existing_env=""
+    [ -f "$ENV_FILE" ] && _existing_env="yes"
+
+    if [ -n "$_existing_env" ]; then
+        echo -e "${YELLOW}Existing values shown in [brackets] — press Enter to keep, or type to override.${NC}"
+    fi
+
+    local _cur _def _input
+
     # ---- Section 1: Wallet & Network (required) ----
     log_info ""
-    log_info "=== Wallet & Network (required) ==="
+    log_info "=== Section 1: Wallet & Network (required) ==="
 
-    read -p "Wallet name [sn35]: " _WALLET_NAME
-    _WALLET_NAME="${_WALLET_NAME:-sn35}"
+    _cur=$(_get_env_val WALLET_NAME)
+    _def="${_cur:-}"
+    read -p "Wallet name${_def:+ [${_def}]}: " _input
+    _WALLET_NAME="${_input:-${_def}}"
+    [ -z "$_WALLET_NAME" ] && { log_error "Wallet name is required."; return 1; }
 
-    read -p "Origin subnet UID [35]: " _ORIGIN_NETUID
-    _ORIGIN_NETUID="${_ORIGIN_NETUID:-35}"
+    _cur=$(_get_env_val ORIGIN_NETUID)
+    _def="${_cur:-}"
+    read -p "Origin subnet UID${_def:+ [${_def}]}: " _input
+    _ORIGIN_NETUID="${_input:-${_def}}"
+    [ -z "$_ORIGIN_NETUID" ] && { log_error "Origin subnet UID is required."; return 1; }
 
-    read -p "Destination subnet UID [35]: " _DEST_NETUID
-    _DEST_NETUID="${_DEST_NETUID:-35}"
+    _cur=$(_get_env_val DEST_NETUID)
+    _def="${_cur:-}"
+    read -p "Destination subnet UID${_def:+ [${_def}]}: " _input
+    _DEST_NETUID="${_input:-${_def}}"
+    [ -z "$_DEST_NETUID" ] && { log_error "Destination subnet UID is required."; return 1; }
 
-    read -p "Origin hotkey (SS58 address): " _ORIGIN_HOTKEY
-    if [ -z "$_ORIGIN_HOTKEY" ]; then
-        log_error "Origin hotkey is required."
-        return 1
+    _cur=$(_get_env_val ORIGIN_HOTKEY)
+    _def="${_cur:-}"
+    read -p "Origin hotkey (SS58)${_def:+ [${_def}]}: " _input
+    _ORIGIN_HOTKEY="${_input:-${_def}}"
+    [ -z "$_ORIGIN_HOTKEY" ] && { log_error "Origin hotkey is required."; return 1; }
+
+    _cur=$(_get_env_val DEST_HOTKEY)
+    _def="${_cur:-}"
+    read -p "Destination hotkey (SS58)${_def:+ [${_def}]}: " _input
+    _DEST_HOTKEY="${_input:-${_def}}"
+    [ -z "$_DEST_HOTKEY" ] && { log_error "Destination hotkey is required."; return 1; }
+
+    _cur=$(_get_env_val WALLET_PASSWORD)
+    if [ -n "$_cur" ]; then
+        read -sp "Wallet password [current: $(mask_secret "$_cur"), Enter to keep]: " _input; echo
+        _WALLET_PASSWORD="${_input:-${_cur}}"
+    else
+        read -sp "Wallet password: " _WALLET_PASSWORD; echo
     fi
+    [ -z "$_WALLET_PASSWORD" ] && { log_error "Wallet password is required."; return 1; }
 
-    read -p "Destination hotkey (SS58 address): " _DEST_HOTKEY
-    if [ -z "$_DEST_HOTKEY" ]; then
-        log_error "Destination hotkey is required."
-        return 1
-    fi
-
-    read -sp "Wallet password: " _WALLET_PASSWORD
-    echo
-    if [ -z "$_WALLET_PASSWORD" ]; then
-        log_error "Wallet password is required."
-        return 1
-    fi
+    _cur=$(_get_env_val MINIMUM_STAKE_THRESHOLD)
+    _def="${_cur:-0.001}"
+    read -p "Minimum stake threshold α [${_def}]: " _input
+    _MIN_STAKE="${_input:-${_def}}"
 
     # ---- Section 2: Telegram (optional) ----
     log_info ""
-    _TELEGRAM_BOT_TOKEN=""
-    _TELEGRAM_CHAT_ID=""
-    read -p "Configure Telegram notifications? (y/N): " -n 1 -r; echo
+    log_info "=== Section 2: Telegram notifications (optional) ==="
+    _TELEGRAM_BOT_TOKEN=$(_get_env_val TELEGRAM_BOT_TOKEN)
+    _TELEGRAM_CHAT_ID=$(_get_env_val TELEGRAM_CHAT_ID)
+    local _tg_hint=""
+    [ -n "$_TELEGRAM_BOT_TOKEN" ] && _tg_hint=" (currently configured)"
+
+    read -p "Configure Telegram notifications?${_tg_hint} (y/N): " -n 1 -r; echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        read -p "Telegram bot token: " _TELEGRAM_BOT_TOKEN
-        read -p "Telegram chat ID: " _TELEGRAM_CHAT_ID
+        _cur=$(_get_env_val TELEGRAM_BOT_TOKEN)
+        if [ -n "$_cur" ]; then
+            read -sp "Bot token [current: $(mask_secret "$_cur"), Enter to keep]: " _input; echo
+            _TELEGRAM_BOT_TOKEN="${_input:-${_cur}}"
+        else
+            read -sp "Bot token: " _TELEGRAM_BOT_TOKEN; echo
+        fi
+
+        _cur=$(_get_env_val TELEGRAM_CHAT_ID)
+        _def="${_cur:-}"
+        read -p "Chat ID${_def:+ [${_def}]}: " _input
+        _TELEGRAM_CHAT_ID="${_input:-${_def}}"
         log_info "Telegram configured."
     fi
 
     # ---- Section 3: Google Sheets (optional) ----
     log_info ""
-    _GOOGLE_SA_JSON=""
-    _GOOGLE_SHEET_ID=""
-    read -p "Configure Google Sheets logging? (y/N): " -n 1 -r; echo
+    log_info "=== Section 3: Google Sheets logging (optional) ==="
+    _GOOGLE_SA_JSON=$(_get_env_val GOOGLE_SERVICE_ACCOUNT_JSON)
+    _GOOGLE_SHEET_ID=$(_get_env_val GOOGLE_SHEET_ID)
+    local _sheets_hint=""
+    [ -n "$_GOOGLE_SHEET_ID" ] && _sheets_hint=" (currently configured)"
+
+    read -p "Configure Google Sheets logging?${_sheets_hint} (y/N): " -n 1 -r; echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        read -p "Path to service-account JSON file: " _GOOGLE_SA_JSON
-        read -p "Google Sheet ID: " _GOOGLE_SHEET_ID
+        _cur=$(_get_env_val GOOGLE_SERVICE_ACCOUNT_JSON)
+        _def="${_cur:-}"
+        read -p "Path to service-account JSON${_def:+ [${_def}]}: " _input
+        _GOOGLE_SA_JSON="${_input:-${_def}}"
+
+        _cur=$(_get_env_val GOOGLE_SHEET_ID)
+        _def="${_cur:-}"
+        read -p "Google Sheet ID${_def:+ [${_def}]}: " _input
+        _GOOGLE_SHEET_ID="${_input:-${_def}}"
         log_info "Google Sheets configured."
+
+        # ---- Section 4: Sheet Setup (optional, for setup_sheets.py) ----
+        log_info ""
+        log_info "=== Section 4: Sheet Setup (for setup_sheets.py — one-time) ==="
+        local _setup_hint=""
+        [ -n "$(_get_env_val PARTNER_COUNT)" ] && _setup_hint=" (currently configured)"
+        read -p "Configure sheet setup variables?${_setup_hint} (y/N): " -n 1 -r; echo
+
+        _SHEET_SETUP_CONFIGURED=""
+        _PARTNERS=()
+        _OPENING_BALANCE="" _OPENING_DATE="" _PARTNER_COUNT=""
+        _FIRST_DIST_DATE="" _CYCLE_DAYS="" _ARCHIVE_TAB_NAMES=""
+
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            _cur=$(_get_env_val OPENING_BALANCE)
+            _def="${_cur:-0.0}"
+            read -p "Opening balance [${_def}]: " _input
+            _OPENING_BALANCE="${_input:-${_def}}"
+
+            _cur=$(_get_env_val OPENING_DATE)
+            _def="${_cur:-$(date +%Y-%m-%d)}"
+            read -p "Opening date (YYYY-MM-DD) [${_def}]: " _input
+            _OPENING_DATE="${_input:-${_def}}"
+
+            _cur=$(_get_env_val PARTNER_COUNT)
+            _def="${_cur:-2}"
+            read -p "Number of distribution partners [${_def}]: " _input
+            _PARTNER_COUNT="${_input:-${_def}}"
+
+            for i in $(seq 1 "$_PARTNER_COUNT"); do
+                log_info "  --- Partner $i ---"
+                _cur=$(_get_env_val "PARTNER_${i}_NAME")
+                _def="${_cur:-Partner${i}}"
+                read -p "    Name [${_def}]: " _input
+                _p_name="${_input:-${_def}}"
+
+                _cur=$(_get_env_val "PARTNER_${i}_SHARE")
+                _def="${_cur:-}"
+                read -p "    Share 0–1${_def:+ [${_def}]}: " _input
+                _p_share="${_input:-${_def}}"
+
+                _cur=$(_get_env_val "PARTNER_${i}_WALLET")
+                _def="${_cur:-}"
+                read -p "    Wallet SS58${_def:+ [${_def}]}: " _input
+                _p_wallet="${_input:-${_def}}"
+
+                _PARTNERS+=("${_p_name}|${_p_share}|${_p_wallet}")
+            done
+
+            _cur=$(_get_env_val FIRST_DIST_DATE)
+            _def="${_cur:-$(date +%Y-%m-%d)}"
+            read -p "First distribution date (YYYY-MM-DD) [${_def}]: " _input
+            _FIRST_DIST_DATE="${_input:-${_def}}"
+
+            _cur=$(_get_env_val CYCLE_DAYS)
+            _def="${_cur:-14}"
+            read -p "Distribution cycle days [${_def}]: " _input
+            _CYCLE_DAYS="${_input:-${_def}}"
+
+            _cur=$(_get_env_val ARCHIVE_TAB_NAMES)
+            _def="${_cur:-}"
+            read -p "Archive tab names (comma-separated, blank to skip)${_def:+ [${_def}]}: " _input
+            _ARCHIVE_TAB_NAMES="${_input:-${_def}}"
+
+            _SHEET_SETUP_CONFIGURED="yes"
+        fi
     fi
 
     # ---- Write .env ----
-    cat > "$ENV_FILE" << EOF
+    {
+        cat <<ENVEOF
 # =============================================================
 # stake-move-automation — runtime configuration
 # Generated by deploy.sh on $(date +%Y-%m-%d)
@@ -289,8 +415,8 @@ DEST_NETUID=$_DEST_NETUID
 ORIGIN_HOTKEY=$_ORIGIN_HOTKEY
 DEST_HOTKEY=$_DEST_HOTKEY
 
-# Minimum stake (α) to sweep — runs below this are skipped [default: 0.001]
-MINIMUM_STAKE_THRESHOLD=0.001
+# Minimum stake (α) to sweep — runs below this are skipped
+MINIMUM_STAKE_THRESHOLD=$_MIN_STAKE
 
 # --- Telegram (optional) ---
 TELEGRAM_BOT_TOKEN=$_TELEGRAM_BOT_TOKEN
@@ -300,31 +426,50 @@ TELEGRAM_CHAT_ID=$_TELEGRAM_CHAT_ID
 GOOGLE_SERVICE_ACCOUNT_JSON=$_GOOGLE_SA_JSON
 GOOGLE_SHEET_ID=$_GOOGLE_SHEET_ID
 
-# --- Sheet Setup (fill in before running setup_sheets.py locally) ---
+ENVEOF
+
+        if [ "${_SHEET_SETUP_CONFIGURED:-}" = "yes" ]; then
+            printf '# --- Sheet Setup (for setup_sheets.py) ---\n'
+            printf 'OPENING_BALANCE=%s\n' "$_OPENING_BALANCE"
+            printf 'OPENING_DATE=%s\n'    "$_OPENING_DATE"
+            printf 'PARTNER_COUNT=%s\n'   "$_PARTNER_COUNT"
+            local _n=1
+            for _entry in "${_PARTNERS[@]}"; do
+                IFS='|' read -r _pn _ps _pw <<< "$_entry"
+                printf 'PARTNER_%s_NAME=%s\n'   "$_n" "$_pn"
+                printf 'PARTNER_%s_SHARE=%s\n'  "$_n" "$_ps"
+                printf 'PARTNER_%s_WALLET=%s\n' "$_n" "$_pw"
+                (( _n++ )) || true
+            done
+            printf 'FIRST_DIST_DATE=%s\n'    "$_FIRST_DIST_DATE"
+            printf 'CYCLE_DAYS=%s\n'         "$_CYCLE_DAYS"
+            printf 'ARCHIVE_TAB_NAMES=%s\n'  "$_ARCHIVE_TAB_NAMES"
+        else
+            cat <<SETUPEOF
+# --- Sheet Setup (fill in before running setup_sheets.py) ---
 # OPENING_BALANCE=0.0
-# OPENING_DATE=2026-01-01
-# GTV_NAME=GTV
-# GTV_SHARE=0.5
-# GTV_WALLET=your_gtv_wallet_ss58
-# PTN_NAME=PTN
-# PTN_SHARE=0.5
-# PTN_WALLET=your_ptn_wallet_ss58
-# FIRST_DIST_DATE=2026-01-10
+# OPENING_DATE=$(date +%Y-%m-%d)
+# PARTNER_COUNT=2
+# PARTNER_1_NAME=Alice
+# PARTNER_1_SHARE=0.5
+# PARTNER_1_WALLET=5...
+# PARTNER_2_NAME=Bob
+# PARTNER_2_SHARE=0.5
+# PARTNER_2_WALLET=5...
+# FIRST_DIST_DATE=$(date +%Y-%m-%d)
 # CYCLE_DAYS=14
-EOF
+# ARCHIVE_TAB_NAMES=
+SETUPEOF
+        fi
+    } > "$ENV_FILE"
 }
 
 if [ -f "$ENV_FILE" ]; then
-    log_info ".env file already exists at $ENV_FILE"
-    read -p "Do you want to update it? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        cp "$ENV_FILE" "${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
-        _collect_and_write_env || exit 1
-        log_info ".env file updated"
-    else
-        log_info "Keeping existing .env file"
-    fi
+    log_info ".env already exists at $ENV_FILE"
+    log_info "Re-prompting all values — press Enter on any line to keep the current value."
+    cp "$ENV_FILE" "${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+    _collect_and_write_env || exit 1
+    log_info ".env file updated"
 else
     log_info "Creating .env file at $ENV_FILE"
     _collect_and_write_env || exit 1
