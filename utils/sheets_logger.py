@@ -384,9 +384,11 @@ class SheetsLogger:
                     break
 
             days_until = (next_dist - today).days if next_dist else 0
-            # Period day = how far into the current 14-day window we are
+            # Period day = how far into the current 14-day window we are.
+            # Distribution day itself counts as Day 14 (sweep + distribute same day),
+            # so we use `or cycle` instead of `+ 1` to map 0 → cycle instead of 0 → 1.
             first = self._parse_date(self._config.get("first_dist_date", "2026-04-10"))
-            period_day = ((today - first).days % cycle) + 1
+            period_day = ((today - first).days % cycle) or cycle
 
             # Projected distribution = current balance + avg_14d * remaining days
             daily_avg = avg_14d if avg_14d > 0 else avg_7d
