@@ -88,9 +88,29 @@ class SheetsLogger:
         rows = ws.get_all_values()
         raw = {row[0].strip(): row[1].strip() for row in rows if len(row) >= 2 and row[0].strip()}
         try:
+            # Loud warning if the Config tab does not use the expected generic
+            # P{i}_* scheme. Without this, missing keys silently fall back to a
+            # default 2-partner / 50-50 split (the bug that hid the PTN removal).
+            if CONFIG_KEYS["partner_count"] not in raw:
+                logger.warning(
+                    "Config tab is missing '%s'; falling back to defaults. "
+                    "Expected keys: Partner_Count, P1_Name, P1_Share, P1_Wallet, ... "
+                    "Distribution shares may be WRONG until the Config tab is fixed.",
+                    CONFIG_KEYS["partner_count"],
+                )
             partner_count = int(raw.get(CONFIG_KEYS["partner_count"], "2"))
             partners: list[dict] = []
             for i in range(1, partner_count + 1):
+                if f"P{i}_Share" not in raw:
+                    logger.warning(
+                        "Config tab missing 'P%d_Share'; using default share for partner %d.",
+                        i, i,
+                    )
+                if not raw.get(f"P{i}_Wallet", "").strip():
+                    logger.warning(
+                        "Config tab has no 'P%d_Wallet'; partner %d distributions cannot be sent.",
+                        i, i,
+                    )
                 partners.append({
                     "name":   raw.get(f"P{i}_Name",   f"P{i}"),
                     "share":  float(raw.get(f"P{i}_Share",  str(round(1 / partner_count, 6)))),
