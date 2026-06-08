@@ -1,4 +1,5 @@
-bittensor
+bittensor>=10.2.1
+bittensor-cli>=9.20.1
 python-dotenv
 requests
 gspread>=6.0.0

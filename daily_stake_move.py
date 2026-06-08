@@ -144,7 +144,7 @@ def init_sheets_logger() -> Optional[SheetsLogger]:
     return None
 
 
-def ensure_wallet_password_cached(wallet: "bt.wallet", password_value: Optional[str] = None) -> None:
+def ensure_wallet_password_cached(wallet: "bt.Wallet", password_value: Optional[str] = None) -> None:
     """Set wallet password in environment variables for keyfile unlocks."""
     if not password_value:
         return
@@ -198,7 +198,7 @@ def ensure_wallet_password_cached(wallet: "bt.wallet", password_value: Optional[
             continue
 
 
-def unlock_wallet(wallet: "bt.wallet") -> None:
+def unlock_wallet(wallet: "bt.Wallet") -> None:
     """Unlock wallet with proper error handling"""
     logger.debug(f"Attempting to unlock coldkey for wallet {wallet}")
     try:
@@ -223,7 +223,7 @@ def unlock_wallet(wallet: "bt.wallet") -> None:
         logger.warning("Hotkey file missing or unreadable; continuing since coldkey suffices for staking extrinsics")
 
 
-def fetch_stake_amount(subtensor: bt.subtensor, coldkey_ss58: str, hotkey_ss58: str, netuid: int) -> Optional[Balance]:
+def fetch_stake_amount(subtensor: bt.Subtensor, coldkey_ss58: str, hotkey_ss58: str, netuid: int) -> Optional[Balance]:
     """Fetch stake amount for a hotkey"""
     try:
         stake = subtensor.get_stake(
@@ -305,7 +305,7 @@ Please check the logs for more details."""
         # Create wallet config using argparse and bt.config()
         parser = argparse.ArgumentParser()
         Wallet.add_args(parser)
-        bt.subtensor.add_args(parser)
+        bt.Subtensor.add_args(parser)
         bt.logging.add_args(parser)
         
         # Parse with wallet name and hotkey
@@ -313,14 +313,13 @@ Please check the logs for more details."""
             '--wallet.name', WALLET_NAME,
             '--wallet.hotkey', 'default',  # Default hotkey name
         ]
-        config = bt.config(parser, args=args)
+        config = bt.Config(parser, args=args)
         
         # Setup bittensor logging
         bt.logging(config=config)
         log("Bittensor logging configured")
         
-        # Create wallet using bt.wallet factory function (not Wallet class directly)
-        wallet = bt.wallet(config=config)
+        wallet = bt.Wallet(config=config)
         log(f"Wallet created: {wallet}")
         
         # Set password in environment for wallet unlock
@@ -349,8 +348,7 @@ Please check the logs for more details."""
 
             sys.exit(1)
 
-        # Create subtensor connection using config
-        subtensor = bt.subtensor(config=config)
+        subtensor = bt.Subtensor(config=config)
         log(f"Connected to subtensor network: {subtensor.network}")
         
         # Get coldkey address
@@ -399,21 +397,21 @@ Please check the logs for more details."""
             root_log = logging.getLogger()
             root_log.addHandler(bt_capture)
             try:
-                success = subtensor.move_stake(
+                response = subtensor.move_stake(
                     wallet=wallet,
-                    origin_hotkey=ORIGIN_HOTKEY,
                     origin_netuid=ORIGIN_NETUID,
-                    destination_hotkey=DEST_HOTKEY,
+                    origin_hotkey_ss58=ORIGIN_HOTKEY,
                     destination_netuid=DEST_NETUID,
+                    destination_hotkey_ss58=DEST_HOTKEY,
                     move_all_stake=True,
                 )
             finally:
                 root_log.removeHandler(bt_capture)
 
-            if not success:
+            if not response.success:
                 captured = bt_capture.best_error()
-                detail = f" — {captured}" if captured else ""
-                raise Exception(f"move_stake returned False{detail}")
+                detail = f" — {captured}" if captured else (f" — {response.message}" if response.message else "")
+                raise Exception(f"move_stake failed{detail}")
             
             log("Stake move operation completed successfully")
             
@@ -453,6 +451,32 @@ Please check the logs for more details."""
                     )
                 except Exception as e:
                     log(f"Warning: Failed to log sweep to sheets: {e}")
+
+            # -------------------------------------------------------
+            # Send sweep success notification first
+            # -------------------------------------------------------
+            if telegram_notifier:
+                telegram_notifier.record_stake_move_success(amount_moved)
+
+                # Fetch rich stats from sheet for the notification
+                stats = {}
+                if sheets_logger:
+                    try:
+                        stats = sheets_logger.get_sweep_stats(amount_moved)
+                    except Exception as e:
+                        log(f"Warning: Could not fetch sweep stats: {e}")
+
+                if stats:
+                    telegram_notifier.send_sweep_success(amount=amount_moved, stats=stats)
+                else:
+                    # Fallback to simple message if sheets not available
+                    current_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S %Z')
+                    dest_total_str = f"{dest_stake_after.tao:.4f} α" if dest_stake_after else "N/A"
+                    telegram_notifier.send_message(
+                        f"✅ <b>Daily Sweep — {current_time}</b>\n\n"
+                        f"Swept: <b>{amount_moved:.4f} α</b>\n"
+                        f"Destination Total: <b>{dest_total_str}</b>"
+                    )
 
             # -------------------------------------------------------
             # Google Sheets: check if distribution is due today
@@ -509,30 +533,6 @@ Please check the logs for more details."""
                         )
                 except Exception as e:
                     log(f"Warning: Pending reminder check failed: {e}")
-
-            # Send success notification
-            if telegram_notifier:
-                telegram_notifier.record_stake_move_success(amount_moved)
-
-                # Fetch rich stats from sheet for the notification
-                stats = {}
-                if sheets_logger:
-                    try:
-                        stats = sheets_logger.get_sweep_stats(amount_moved)
-                    except Exception as e:
-                        log(f"Warning: Could not fetch sweep stats: {e}")
-
-                if stats:
-                    telegram_notifier.send_sweep_success(amount=amount_moved, stats=stats)
-                else:
-                    # Fallback to simple message if sheets not available
-                    current_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S %Z')
-                    dest_total_str = f"{dest_stake_after.tao:.4f} α" if dest_stake_after else "N/A"
-                    telegram_notifier.send_message(
-                        f"✅ <b>Daily Sweep — {current_time}</b>\n\n"
-                        f"Swept: <b>{amount_moved:.4f} α</b>\n"
-                        f"Destination Total: <b>{dest_total_str}</b>"
-                    )
             
             log("==========================================")
             log("Daily stake move operation completed")
